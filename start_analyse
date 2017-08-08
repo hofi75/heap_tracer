@@ -1,0 +1,5 @@
+# readelf -x 2 5 ucsj.so > ucsj.so.txt
+# readelf -s ucsj.so > ucsj.so.txt_dump
+# nm ucsj.so > ucxj_nm.txt
+#objdump -SR ucsj.so > ucsj.so.dump
+objdump -d -l my-leaky-program > objdump.txt

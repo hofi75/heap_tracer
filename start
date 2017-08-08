@@ -1,0 +1,7 @@
+# export HEAP_TRACER='progname=my-leaky-program backtrace'
+export HEAP_TRACER='trace_calls backtrace trace_module'
+export HEAP_TRACER='backtrace'
+# report_path=/tmp/'
+LD_PRELOAD=./heap_tracer2.so ./my-leaky-program
+# LD_PRELOAD=./heap_tracer.so sudo apt-get update
+
