@@ -9,4 +9,4 @@ heap_tracer.so: heap_tracer.c
 	gcc -shared -fPIC -rdynamic -Wno-deprecated-declarations -g -std=c99 heap_tracer.c -o heap_tracer.so
 
 my-leaky-program: my-leaky-program.c
-	gcc -rdynamic my-leaky-program.c -o my-leaky-program
+	gcc -rdynamic my-leaky-program.c -g -o my-leaky-program

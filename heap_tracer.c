@@ -93,6 +93,7 @@ int trc(const char *, ...);
 void __dump(const char *title, char *addr, size_t len);
 
 extern const char *__progname;
+static	void *troot = NULL;
 
 /* Prototypes for our hooks.  */
 static void my_init_hook(void);
@@ -125,7 +126,7 @@ static void prepare(void) {
 	char *htenv, *p, temp[256], report_path[256];
 	struct sigaction sa;
 
-	memset(htc, 0, sizeof(*htc));
+	memset( htc, 0, sizeof( heap_tracer_context_t));
 
 	// check if our program name is defined in HEAP_TRACER
 	htenv = getenv( HT_ENV);
@@ -202,14 +203,26 @@ static int ae_compare_id(const void *node1, const void *node2) {
 	return 1;
 }
 
-static int ae_compare_address(const void *node1, const void *node2) {
+static int ae_compare_address( const void *node1, const void *node2)
+{
 	allocate_entry_t *ae1 = (allocate_entry_t *) node1;
 	allocate_entry_t *ae2 = (allocate_entry_t *) node2;
+	int rslt = 0;
 
-	if (ae1->addr == ae2->addr) return 0;
-	if (ae1->addr < ae2->addr)	return -1;
+	if ( is_trace_module)
+	{
+		trc( "compare -->\n");
+		trc( "compare(%p,%p)\n", ae1, ae2);
+		trc( "\taddr(%p <--> %p)\n", ae1->addr, ae2->addr);
+	}
 
-	return 1;
+	if ( ae1->addr < ae2->addr)	rslt = -1;
+	if ( ae1->addr > ae2->addr)	rslt = 1;
+
+	if ( is_trace_module)
+		trc( "compare result = %d\n", rslt);
+
+	return rslt;
 }
 
 void ae_free_node( void *node)
@@ -220,7 +233,7 @@ void ae_free_node( void *node)
 	{
 		trc("[ID=%lld] area at %p with size %ld not freed\n",
 				ae->id, ae->addr, ae->size);
-		trc("     backtrace = %s\n", ae->backtrace);
+		trc("     backtrace = \n%s\n", ae->backtrace);
 		__dump("AREA", ae->addr, ae->size);
 	}
 
@@ -252,7 +265,7 @@ static void unload(void) {
 			(long) (htc->allocated / (1024 * 1024)));
 
 #ifdef __USE_TSEARCH
-	tdestroy( htc->troot, &ae_free_node);
+	tdestroy( troot, &ae_free_node);
 #else
 	trc( "sorting allocate table by ID...\n");
 	qsort( (void *) htc->table, htc->unused, sizeof(allocate_entry_t),
@@ -298,7 +311,7 @@ void generate_backtrace_string(char *result, const void *caller) {
 
 	for (l = SIZE_BACKTRACE, p = result, i = 2; i < size && messages[i] != NULL;
 			++i) {
-		x = snprintf(p, l - 1, "[[%d][%s]]\n\t\t", i, messages[i]);
+		x = snprintf( p, l - 1, "\t\t[[%d][%s]]\n", i, messages[i]);
 		p += x;
 		l -= x;
 		if (l < 400)
@@ -307,7 +320,7 @@ void generate_backtrace_string(char *result, const void *caller) {
 	free(messages);
 
 	if ( is_trace_module)
-		trc("%s <-- %s\n", __FUNCTION__, result);
+		trc("%s <-- \n%s\n", __FUNCTION__, result);
 
 }
 
@@ -337,7 +350,7 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	allocate_entry_t *new_ae, *ae;
 
 	if ( is_trace_module)
-		trc("%s(%p,%ld) -->\n", __FUNCTION__, addr, size);
+		trc("%s(%p,%ld,troot=%p) -->\n", __FUNCTION__, addr, size, troot);
 
 	// save in table
 	new_ae = malloc( sizeof( allocate_entry_t));
@@ -353,12 +366,13 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	htc->entries++;
 	htc->allocated += size;
 
-	ae = *( allocate_entry_t **) tsearch( ( void *) new_ae, &htc->troot, &ae_compare_address);
+	ae = *( allocate_entry_t **)
+			tsearch( ( void *) new_ae, &(troot), &ae_compare_address);
 
 	if ( is_trace_module)
-		trc("%s <-- (ae=%p)\n", __FUNCTION__, ae);
+		trc("%s <-- (new_ae=%p, ae=%p)\n", __FUNCTION__, new_ae, ae);
 
-	return ae;
+	return new_ae;
 }
 #else
 allocate_entry_t * table_add_entry(char *addr, size_t size) {
@@ -405,24 +419,29 @@ allocate_entry_t * table_add_entry(char *addr, size_t size) {
 void * table_remove_entry( void *addr, const char *backtrace)
 {
 	int 			 i, found = 0;
-	allocate_entry_t *search_ae = alloca( sizeof( allocate_entry_t)), *ae;
-	void			*rslt;
+	allocate_entry_t	ssearch_ae;
+	allocate_entry_t 	*search_ae = &ssearch_ae, *ae;
+	void				*rslt;
 
 	if ( is_trace_module)
-		trc("%s(%p) -->\n", __FUNCTION__, addr);
+		trc("%s(%p,troot=%p) -->\n", __FUNCTION__, addr, troot);
 
 	if ( addr == NULL) return NULL;
-
 	/* search by address */
+	memset( search_ae, 0, sizeof( allocate_entry_t));
 	search_ae->addr = addr;
-	ae = *( allocate_entry_t **) tfind( ( void *) search_ae,
-				&htc->troot, &ae_compare_address);
-	if ( !ae)
+	if ( is_trace_module)
+		trc("tfind(search_ae=%p,addr=%p)\n", search_ae, search_ae->addr);
+	void *x = tfind( ( void *) search_ae, &(troot), &ae_compare_address);
+	if ( !x)
 	{
-		trc("? (FREE/REALLOC)(NOT FOUND) - / %p  ==> %s\n", addr, backtrace);
+		trc("? (FREE/REALLOC)(NOT FOUND) - / %p  ==> \n%s\n", addr, backtrace);
 		return NULL;
 	}
-	tdelete( ( void *) ae, &htc->troot, &ae_compare_address);
+	ae = *( allocate_entry_t **) x;
+	if ( is_trace_module)
+		trc("tdelete(search_ae=%p,addr=%p)\n", ae, ae->addr);
+	tdelete( ( void *) ae, &(troot), &ae_compare_address);
 	rslt = ae->real_addr;
 	htc->entries--;
 	htc->allocated += ae->size;
@@ -496,7 +515,7 @@ static void *my_malloc_hook(size_t size, const void *caller)
 	generate_backtrace_string( ae->backtrace, caller);
 
 	if ( is_trace_calls)
-		trc("+ (MALLOC)  %10ld / %8p  ==> %s\n", size, ae->addr, ae->backtrace);
+		trc("+ (MALLOC)  %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 
 	set_checkstring( ae);
 
@@ -532,14 +551,14 @@ static void *my_memalign_hook(size_t alignment, size_t size, const void *caller)
 	if (old_memalign_hook != NULL)
 		addr = (__ptr_t) (*old_memalign_hook)(alignment, alloc_size, caller);
 	else
-		addr = (__ptr_t) memalign(alignment, alloc_size);
+		addr = (__ptr_t) memalign( alignment, alloc_size);
 
-	ae = table_add_entry(addr, size);
-	generate_backtrace_string(ae->backtrace, caller);
-	set_checkstring(ae);
+	ae = table_add_entry( addr, size);
+	generate_backtrace_string( ae->backtrace, caller);
+	set_checkstring( ae);
 
 	if ( is_trace_calls)
-		trc("+ (MEMALIGN) %10ld / %8p  ==> %s\n", size, ae->addr,
+		trc("+ (MEMALIGN) %10ld / %8p  ==> \n%s\n", size, ae->addr,
 				ae->backtrace);
 
 	if ( is_trace_module)
@@ -584,8 +603,8 @@ static void *my_realloc_hook(void *ptr, size_t size, const void *caller)
 	generate_backtrace_string( ae->backtrace, caller);
 
 	if ( is_trace_calls) {
-		trc("- (REALLOC)          - / %8p  ==> %s\n", ptr, ae->backtrace);
-		trc("+ (REALLOC) %10ld / %8p  ==> %s\n", size, ae->addr, ae->backtrace);
+		trc("- (REALLOC)          - / %8p  ==> \n%s\n", ptr, ae->backtrace);
+		trc("+ (REALLOC) %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 	}
 
 	set_checkstring( ae);
@@ -620,7 +639,7 @@ static void my_free_hook(void *ptr, const void *caller)
 		free( addr);
 
 	if ( is_trace_calls)
-		trc("- (FREE)             - / %8p  ==> %s\n", addr, bts);
+		trc("- (FREE)             - / %8p  ==> \n%s\n", addr, bts);
 
 	if ( is_trace_module)
 		trc("%s( %p) <--\n", __FUNCTION__, addr);
@@ -760,7 +779,7 @@ int check_boundaries(allocate_entry_t *ae) {
 }
 
 int trc(const char *text, ...) {
-	char insert[8192];
+	char insert[32000];
 	va_list vl;
 
 	va_start( vl, text);

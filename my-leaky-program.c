@@ -2,12 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
+#include <search.h>
 
 int counter = 0;
-
-#define ADDRESS_TABLE_SIZE	1024
-
-void	*addresses[ADDRESS_TABLE_SIZE];
 
 void bar0();
 void bar1();
@@ -49,15 +47,22 @@ int allocator( void)
     	}
     }
 */
-    size = rand() % 1024;
-	// printf( "allocate %ld bytes...\n", size);
-	p = malloc( size);
+    size = 16 + rand() % 256;
+    if ( rand() % 2)
+    	p = malloc( size);
+    else
+    	p = memalign( 32, size);
+
 	memset( p, 0x55, size);
+	strcpy( p, "MALLOC/MEMALIGN");
+
 	if ( rand() % 2)
 	{
 		p = realloc( p, size * 3);
 		memset( p, 0xaa, size * 3);
+		strcpy( p, "REALLOC");
 	}
+
 	if ( rand() % 2) free( p);
 
     return 0;
@@ -85,10 +90,45 @@ void foo()
 	RECURSIVE_FUNCTION_BODY
 }
 
+static int compare( const void *p1, const void *p2)
+{
+	int *a = ( int *) p1, *b = ( int *) p2;
+
+	printf( "compare(%d,%d)\n", *a, *b);
+
+	if ( *a > *b) return 1;
+	if ( *a < *b) return -1;
+
+	return 0;
+}
+
 int main( void)
 {
-	memset( addresses, 0, sizeof( addresses));
-    for( int i = 0; i < 10; i++)
+/*	void *troot = NULL;
+	int		a = 10, b = 20, c = 15, d = 3, f = 9;
+
+	printf( "tfind(f)\n");
+	tfind( &f, &troot, compare);
+	printf( "tsearch(a)\n");
+	tsearch( &a, &troot, compare);
+	printf( "tsearch(b)\n");
+	tsearch( &b, &troot, compare);
+	printf( "tsearch(c)\n");
+	tsearch( &c, &troot, compare);
+	printf( "tsearch(d)\n");
+	tsearch( &d, &troot, compare);
+	printf( "tdelete(b)\n");
+	tdelete( &b, &troot, compare);
+	printf( "tfind(f)\n");
+	tfind( &f, &troot, compare);
+	malloc( 1000);
+	malloc( 1000);
+*/
+	free( ( void *) 0x1000);
+	free( ( void *) 0x2000);
+	free( ( void *) 0x3000);
+	free( ( void *) 0x4000);
+    for( int i = 0; i < 1000; i++)
     {
     	RECURSIVE_FUNCTION_BODY
     }
