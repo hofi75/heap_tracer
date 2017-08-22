@@ -44,6 +44,7 @@ typedef struct __allocate_entry {
 	void 				*real_addr;		// points to libc allocated memory
 	void 				*trailer_cs;	// trailer check string
 	size_t 				size;
+	pid_t				pid;
 	char 				checkstring[SIZE_CHECK_AREA];
 	char 				backtrace[SIZE_BACKTRACE];
 } allocate_entry_t;
@@ -58,10 +59,12 @@ typedef struct __heap_tracer_context {
 	int 				unused;
 	int					entries;
 	int					allocated;
-	int 				max;
+	int 				max_entries;
+	int 				max_size;
 	int 				size;
 	unsigned long long 	id;
 	pthread_mutex_t 	lock;
+	pid_t				start_pid;
 	int 				flag;
 #define	FLAG_ACTIVE				0x0001
 #define	FLAG_TRACE_MODULE			0x0002
@@ -189,6 +192,8 @@ static void prepare(void) {
 	memset(htc->table, 0, SIZE_TABLE);
 #endif
 
+	htc->start_pid = getpid();
+
 	hooks_backup();
 	hooks_setmine();
 }
@@ -231,8 +236,8 @@ void ae_free_node( void *node)
 
 	if ( ae->addr != NULL)
 	{
-		trc("[ID=%lld] area at %p with size %ld not freed\n",
-				ae->id, ae->addr, ae->size);
+		trc("[ID=%lld] area at %p with size %ld not freed (pid=%d)\n",
+				ae->id, ae->addr, ae->size, ae->pid);
 		trc("     backtrace = \n%s\n", ae->backtrace);
 		__dump("AREA", ae->addr, ae->size);
 	}
@@ -243,6 +248,7 @@ void ae_free_node( void *node)
 
 
 static void unload(void) {
+
 	int i;
 	size_t sum;
 	allocate_entry_t *ae;
@@ -263,6 +269,10 @@ static void unload(void) {
 	trc( "number of unallocated entries : %d\n", htc->entries);
 	trc( "size   of unallocated entries : %ld MB\n",
 			(long) (htc->allocated / (1024 * 1024)));
+
+	trc( "max number of entries         : %d\n", htc->max_entries);
+	trc( "max memory usage              : %ld MB\n", (long) (htc->max_size / (1024 * 1024)));
+
 
 #ifdef __USE_TSEARCH
 	tdestroy( troot, &ae_free_node);
@@ -363,8 +373,12 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 		new_ae->addr = addr;
 	new_ae->size = size;
 	new_ae->id = htc->id++;
+	new_ae->pid = getpid();
 	htc->entries++;
 	htc->allocated += size;
+
+	if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
+	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
 
 	ae = *( allocate_entry_t **)
 			tsearch( ( void *) new_ae, &(troot), &ae_compare_address);
@@ -444,7 +458,9 @@ void * table_remove_entry( void *addr, const char *backtrace)
 	tdelete( ( void *) ae, &(troot), &ae_compare_address);
 	rslt = ae->real_addr;
 	htc->entries--;
-	htc->allocated += ae->size;
+	if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
+	htc->allocated -= ae->size;
+	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
 	free( ae);
 
 	if ( is_trace_module)
@@ -618,6 +634,18 @@ static void *my_realloc_hook(void *ptr, size_t size, const void *caller)
 	return ae->addr;
 }
 
+/*
+int	check_pid()
+{
+	if ( htc->start_pid == getpid()) return 0;
+	hooks_restore();
+
+	tdestroy( troot, &ae_free_node);
+	fclose( htc->heap_report);
+
+	return 0;
+}
+*/
 static void my_free_hook(void *ptr, const void *caller)
 {
 	char 	bts[8192];
@@ -786,6 +814,6 @@ int trc(const char *text, ...) {
 	vsprintf( insert, text, vl);
 	va_end( vl);
 
-	fprintf( htc->heap_report, "%s", insert);
+	fprintf( htc->heap_report, "[%d] - %s", getpid(), insert);
 	fflush( htc->heap_report);
 }
