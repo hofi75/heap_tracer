@@ -10,3 +10,6 @@ heap_tracer.so: heap_tracer.c
 
 my-leaky-program: my-leaky-program.c
 	gcc -rdynamic my-leaky-program.c -g -o my-leaky-program
+
+#test_getgrgid: test_getgrgid.c
+#	gcc -rdynamic test_getgrgid.c -g -o test_getgrgid

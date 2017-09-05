@@ -22,6 +22,9 @@
 #include <ucontext.h>
 #include <search.h>
 
+ // #define __USE_GNU
+#include <dlfcn.h>
+
 #include <time.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -125,11 +128,28 @@ static heap_tracer_context_t *htc = &shtc;
 #define HT_ENV 		"HEAP_TRACER"
 #define LOCK
 
+
+static void *(*real_malloc) (size_t size) = 0;
+static void (*real_free) (void *ptr) = 0;
+static void *(*real_realloc) (void *ptr, size_t size) = 0;
+static void *(*real_calloc) (size_t nmemb, size_t size) = 0;
+
+static void init_me()
+{
+    real_malloc = dlsym(RTLD_NEXT, "malloc");
+    real_calloc = dlsym(RTLD_NEXT, "calloc");
+    real_free   = dlsym(RTLD_NEXT, "free");
+    real_realloc = dlsym(RTLD_NEXT, "realloc");
+}
+
+
 static void prepare(void) {
 	char *htenv, *p, temp[256], report_path[256];
 	struct sigaction sa;
 
 	memset( htc, 0, sizeof( heap_tracer_context_t));
+
+	init_me();
 
 	// check if our program name is defined in HEAP_TRACER
 	htenv = getenv( HT_ENV);
