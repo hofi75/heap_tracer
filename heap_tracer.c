@@ -21,6 +21,7 @@
 #include <string.h>
 #include <ucontext.h>
 #include <search.h>
+#include <fcntl.h>
 
  // #define __USE_GNU
 #include <dlfcn.h>
@@ -37,8 +38,8 @@
 #define flag_test( _flag, _mask) \
    ( _flag & ( _mask))
 
-#define SIZE_CHECK_AREA		32
-#define SIZE_BACKTRACE		8192
+#define SIZE_CHECK_AREA				32
+#define SIZE_BACKTRACE_STRING		8192
 
 typedef struct __allocate_entry {
 	char 				eyec[4];
@@ -49,7 +50,7 @@ typedef struct __allocate_entry {
 	size_t 				size;
 	pid_t				pid;
 	char 				checkstring[SIZE_CHECK_AREA];
-	char 				backtrace[SIZE_BACKTRACE];
+	char 				backtrace[SIZE_BACKTRACE_STRING];
 } allocate_entry_t;
 
 typedef struct __heap_tracer_context {
@@ -69,15 +70,17 @@ typedef struct __heap_tracer_context {
 	pthread_mutex_t 	lock;
 	pid_t				start_pid;
 	int 				flag;
-#define	FLAG_ACTIVE				0x0001
+#define	FLAG_ACTIVE					0x0001
 #define	FLAG_TRACE_MODULE			0x0002
 #define	FLAG_TRACE_HEAP_CALLS		0x0004
 #define	FLAG_BACKTRACE				0x0008
 #define	FLAG_CHECK_BOUNDARIES		0x0010
 #define	FLAG_LOCKING				0x0020
+#define	FLAG_BACKTRACE_FD			0x0040
 	int 				flag_active;
 	int 				flag_trace_calls;
 	int 				flag_backtrace;
+	int					bt_pipes[2];
 } heap_tracer_context_t;
 
 #define is_active			flag_test( htc->flag, FLAG_ACTIVE)
@@ -86,6 +89,7 @@ typedef struct __heap_tracer_context {
 #define is_backtrace		flag_test( htc->flag, FLAG_BACKTRACE)
 #define is_check_boundaries	flag_test( htc->flag, FLAG_CHECK_BOUNDARIES)
 #define is_locking			flag_test( htc->flag, FLAG_LOCKING)
+#define is_backtrace_fd		flag_test( htc->flag, FLAG_BACKTRACE_FD)
 
 static void prepare(void) __attribute__((constructor));
 static void unload(void) __attribute__((destructor));
@@ -128,12 +132,12 @@ static heap_tracer_context_t *htc = &shtc;
 #define HT_ENV 		"HEAP_TRACER"
 #define LOCK
 
-
 static void *(*real_malloc) (size_t size) = 0;
 static void (*real_free) (void *ptr) = 0;
 static void *(*real_realloc) (void *ptr, size_t size) = 0;
 static void *(*real_calloc) (size_t nmemb, size_t size) = 0;
 
+/*
 static void init_me()
 {
     real_malloc = dlsym(RTLD_NEXT, "malloc");
@@ -141,15 +145,16 @@ static void init_me()
     real_free   = dlsym(RTLD_NEXT, "free");
     real_realloc = dlsym(RTLD_NEXT, "realloc");
 }
-
+*/
 
 static void prepare(void) {
 	char *htenv, *p, temp[256], report_path[256];
 	struct sigaction sa;
 
 	memset( htc, 0, sizeof( heap_tracer_context_t));
+	strcpy( report_path, "");
 
-	init_me();
+	// init_me();
 
 	// check if our program name is defined in HEAP_TRACER
 	htenv = getenv( HT_ENV);
@@ -171,11 +176,14 @@ static void prepare(void) {
 		if ((p = strstr(htenv, "trace_calls")) != NULL)
 			flag_set(htc->flag, FLAG_TRACE_HEAP_CALLS);
 
-		if ((p = strstr(htenv, "trace_module")) != NULL)
+		if ((p = strstr(htenv, "trace_modul")) != NULL)
 			flag_set(htc->flag, FLAG_TRACE_MODULE);
 
 		if ((p = strstr(htenv, "backtrace")) != NULL)
 			flag_set(htc->flag, FLAG_BACKTRACE);
+
+		if ((p = strstr(htenv, "backtrace_fd")) != NULL)
+			flag_set(htc->flag, FLAG_BACKTRACE | FLAG_BACKTRACE_FD);
 
 		if ((p = strstr(htenv, "check_boundaries")) != NULL)
 			flag_set(htc->flag, FLAG_CHECK_BOUNDARIES);
@@ -184,22 +192,23 @@ static void prepare(void) {
 			flag_set(htc->flag, FLAG_LOCKING);
 	}
 
-	flag_set(htc->flag, FLAG_ACTIVE);
+	flag_set( htc->flag, FLAG_ACTIVE);
 
-	sprintf(temp, "%sheap_report_%s_%d.txt", report_path, __progname, getpid());
-	if ((htc->heap_report = fopen(temp, "w+t")) == NULL) {
-		printf("unable to create heap report (%s)\n", temp);
-		exit(16);
+	sprintf( temp, "%sheap_report_%s_%d.txt", report_path, __progname, getpid());
+	if ( ( htc->heap_report = fopen( temp, "w+t")) == NULL) {
+		printf( "unable to create heap report (%s)\n", temp);
+		exit( 16);
 	}
 
-	trc( "heap trace file '%s' opened for\n\n", temp);
-	trc( "\texecutable    = '%s'\n", __progname);
-	trc( "\tenvironment   = '%s'\n", htenv);
-	trc( "\tbacktracing   = %s\n", ( is_backtrace) ? "yes" : "no");
-	trc( "\ttrace calls   = %s\n", ( is_trace_calls) ? "yes" : "no");
-	trc( "\ttrace module  = %s\n", ( is_trace_module) ? "yes" : "no");
-	trc( "\tbounday check = %s\n", ( is_check_boundaries) ? "yes" : "no");
-	trc( "\tlock          = %s\n", ( is_locking) ? "yes" : "no");
+	trc( "heap trace file '%s' opened for\n", temp);
+	trc( "\texecutable       = '%s'\n", __progname);
+	trc( "\tenvironment      = '%s'\n", htenv);
+	trc( "\tbacktracing      = %s\n", ( is_backtrace) ? "yes" : "no");
+	trc( "\tbacktracing mode = %s\n", ( is_backtrace_fd) ? "file descriptor" : "normal");
+	trc( "\ttrace calls      = %s\n", ( is_trace_calls) ? "yes" : "no");
+	trc( "\ttrace module     = %s\n", ( is_trace_module) ? "yes" : "no");
+	trc( "\tbounday check    = %s\n", ( is_check_boundaries) ? "yes" : "no");
+	trc( "\tlock             = %s\n", ( is_locking) ? "yes" : "no");
 	trc( "\n");
 
 	if ( is_locking)
@@ -207,10 +216,18 @@ static void prepare(void) {
 
 	// allocate entries for allocate table
 #ifndef __USE_TSEARCH
-	htc->size = 64 * 1024;
+	htc->size = 256 * 1024;
 	htc->table = (allocate_entry_t *) malloc( SIZE_TABLE);
 	memset(htc->table, 0, SIZE_TABLE);
 #endif
+
+	if ( is_backtrace_fd)
+	{
+		pipe( htc->bt_pipes);
+		trc( "\tbacktrace pipes     = %d/%d\n", htc->bt_pipes[0], htc->bt_pipes[1]);
+		int retval = fcntl( htc->bt_pipes[0], F_SETFL, fcntl(htc->bt_pipes[0], F_GETFL) | O_NONBLOCK);
+		trc( "fcntl retcode = %d\n", retval);
+	}
 
 	htc->start_pid = getpid();
 
@@ -265,8 +282,6 @@ void ae_free_node( void *node)
 	free( node);
 }
 
-
-
 static void unload(void) {
 
 	int i;
@@ -305,23 +320,28 @@ static void unload(void) {
 	{
 		if (ae->addr == NULL) continue;
 
-		trc("[%d][ID=%lld] area at %p with size %ld not freed\n", i, ae->id,
+		trc( "[%d][ID=%lld] area at %p with size %ld not freed\n", i, ae->id,
 				ae->addr, ae->size);
-		trc("     backtrace = %s\n", ae->backtrace);
-		__dump("AREA", ae->addr, ae->size);
+		trc( "     backtrace = %s\n", ae->backtrace);
+		__dump( "AREA", ae->addr, ae->size);
 	}
 
-	free(htc->table);
+	free( htc->table);
 #endif
 
-	fclose(htc->heap_report);
+	fclose( htc->heap_report);
+	if ( is_backtrace_fd)
+	{
+		close( htc->bt_pipes[0]);
+		close( htc->bt_pipes[1]);
+	}
 }
 
-#define BACKTRACE_SIZE 24
+#define BT_ARRAY_SIZE 100
 
-void * array[BACKTRACE_SIZE * 4];
+void * array[BT_ARRAY_SIZE];
 
-void generate_backtrace_string(char *result, const void *caller) {
+void generate_backtrace_string( char *result, const void *caller) {
 	char **messages;
 	char *p;
 	int size, i, l, x;
@@ -333,25 +353,36 @@ void generate_backtrace_string(char *result, const void *caller) {
 	if ( is_trace_module)
 		trc("%s -->\n", __FUNCTION__);
 
-	size = backtrace(array, BACKTRACE_SIZE);
+	size = backtrace( array, BT_ARRAY_SIZE);
 	if ( is_trace_module)
 		trc("\tbacktrace size = %d\n", size);
 
-	messages = backtrace_symbols(array, size);
+	if ( is_backtrace_fd)
+	{
+		backtrace_symbols_fd( array, size, htc->bt_pipes[1]);
+		i = read( htc->bt_pipes[0], result, SIZE_BACKTRACE_STRING-1);
+		result[i] = '\0';
 
-	for (l = SIZE_BACKTRACE, p = result, i = 2; i < size && messages[i] != NULL;
-			++i) {
-		x = snprintf( p, l - 1, "\t\t[[%d][%s]]\n", i, messages[i]);
-		p += x;
-		l -= x;
-		if (l < 400)
-			break;
+		/* read remaining from pipe */
+		/* char  temp[256];
+		for( i = 0;; i++)
+			if ( read( htc->bt_pipes[0], temp, sizeof( temp)) == 0) break; */
+	} else
+	{
+		messages = backtrace_symbols( array, size);
+
+		for (l = BT_ARRAY_SIZE, p = result, i = 2; i < size && messages[i] != NULL; ++i) 
+		{
+			x = snprintf( p, l - 1, "\t\t[[%d][%s]]\n", i, messages[i]);
+			p += x;
+			l -= x;
+			if (l < 400) break;
+		}
+		free( messages);
 	}
-	free(messages);
 
 	if ( is_trace_module)
 		trc("%s <-- \n%s\n", __FUNCTION__, result);
-
 }
 
 void hooks_backup(void) {
@@ -613,7 +644,7 @@ static void *my_realloc_hook(void *ptr, size_t size, const void *caller)
 	void 				*addr;
 	allocate_entry_t 	*ae;
 	size_t 				alloc_size;
-	char 				bts[8192];
+	char 				bts[SIZE_BACKTRACE_STRING];
 
 	if ( is_locking)
 		pthread_mutex_lock(&htc->lock);
@@ -668,7 +699,7 @@ int	check_pid()
 */
 static void my_free_hook(void *ptr, const void *caller)
 {
-	char 	bts[8192];
+	char 	bts[SIZE_BACKTRACE_STRING];
 	void	*addr;
 
 	if ( is_locking)

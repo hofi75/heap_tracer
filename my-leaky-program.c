@@ -63,7 +63,8 @@ int allocator( void)
 		strcpy( p, "REALLOC");
 	}
 
-	if ( rand() % 2) free( p);
+	// if ( rand() % 2) free( p);
+	free( p);
 
     return 0;
 }
