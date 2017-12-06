@@ -5,6 +5,8 @@
 #define __USE_GNU
 #endif
 
+#define _POSIX_SOURCE
+
 #define __USE_TSEARCH
 
 #include <stdio.h>
@@ -30,6 +32,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <time.h>
 
 #define flag_set( _flag, _mask) \
    _flag |= _mask;
@@ -49,6 +52,7 @@ typedef struct __allocate_entry {
 	void 				*trailer_cs;	// trailer check string
 	size_t 				size;
 	pid_t				pid;
+	char				timestamp[48];
 	char 				checkstring[SIZE_CHECK_AREA];
 	char 				backtrace[SIZE_BACKTRACE_STRING];
 } allocate_entry_t;
@@ -303,8 +307,8 @@ void ae_free_node( void *node)
 
 	if ( ae->addr != NULL)
 	{
-		trc("[ID=%lld] area at %p with size %ld not freed (pid=%d)\n",
-				ae->id, ae->addr, ae->size, ae->pid);
+		trc("[ID=%lld] area at %p with size %ld not freed (pid=%d), timestamp=%s\n",
+				ae->id, ae->addr, ae->size, ae->pid, ae->timestamp);
 		trc("     backtrace = \n%s\n", ae->backtrace);
 		__dump("AREA", ae->addr, ae->size);
 	}
@@ -440,6 +444,11 @@ void hooks_setmine(void) {
 allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	allocate_entry_t *new_ae, *ae;
 
+  	int result;
+  	struct timespec tp;
+	struct tm ltime;
+	clockid_t clk_id;
+
 	if ( is_trace_module)
 		trc("%s(%p,%ld,troot=%p) -->\n", __FUNCTION__, addr, size, troot);
 
@@ -457,6 +466,17 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	new_ae->pid = getpid();
 	htc->entries++;
 	htc->allocated += size;
+
+	clk_id = CLOCK_REALTIME_COARSE;
+  	result = clock_gettime( clk_id, &tp);
+#define SECS_PER_DAY	  ( 60*60*24)
+	int rem = tp.tv_sec % SECS_PER_DAY;
+	int sec = rem % 60;
+	rem /= 60;
+	int min = rem % 60;
+	int hour = rem / 60;
+
+	sprintf( new_ae->timestamp, "%.2d:%.2d:%.2d.%ld", hour, min, sec, tp.tv_nsec);
 
 	if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
 	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
