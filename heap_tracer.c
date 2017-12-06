@@ -53,6 +53,7 @@ typedef struct __allocate_entry {
 	size_t 				size;
 	pid_t				pid;
 	char				timestamp[48];
+  	struct timespec 	tp;
 	char 				checkstring[SIZE_CHECK_AREA];
 	char 				backtrace[SIZE_BACKTRACE_STRING];
 } allocate_entry_t;
@@ -307,6 +308,12 @@ void ae_free_node( void *node)
 
 	if ( ae->addr != NULL)
 	{
+		struct tm ltime;
+		localtime_r( &ae->tp.tv_sec, &ltime);
+		sprintf( ae->timestamp, "%.4d%.2d%.2d/%.2d%.2d%.2d.%ld", 
+			ltime.tm_year + 1900, ltime.tm_mon + 1, ltime.tm_mday,
+			ltime.tm_hour, ltime.tm_min, ltime.tm_sec, 
+			ae->tp.tv_nsec);
 		trc("[ID=%lld] area at %p with size %ld not freed (pid=%d), timestamp=%s\n",
 				ae->id, ae->addr, ae->size, ae->pid, ae->timestamp);
 		trc("     backtrace = \n%s\n", ae->backtrace);
@@ -468,7 +475,8 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	htc->allocated += size;
 
 	clk_id = CLOCK_REALTIME_COARSE;
-  	result = clock_gettime( clk_id, &tp);
+  	result = clock_gettime( clk_id, &new_ae->tp);
+	  /*
 #define SECS_PER_DAY	  ( 60*60*24)
 	int rem = tp.tv_sec % SECS_PER_DAY;
 	int sec = rem % 60;
@@ -477,7 +485,7 @@ allocate_entry_t * table_add_entry( char *addr, size_t size) {
 	int hour = rem / 60;
 
 	sprintf( new_ae->timestamp, "%.2d:%.2d:%.2d.%ld", hour, min, sec, tp.tv_nsec);
-
+*/
 	if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
 	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
 
