@@ -81,6 +81,7 @@ typedef struct __heap_tracer_context {
 	int 				flag_trace_calls;
 	int 				flag_backtrace;
 	int					bt_pipes[2];
+	size_t				dump_limit;
 } heap_tracer_context_t;
 
 #define is_active			flag_test( htc->flag, FLAG_ACTIVE)
@@ -158,47 +159,73 @@ static void prepare(void) {
 
 	// check if our program name is defined in HEAP_TRACER
 	htenv = getenv( HT_ENV);
-	if (htenv) {
-		char *d;
+	if ( !htenv || strlen( htenv) == 0)
+	{
+		printf( 
+			"heap tracer preload library\n"
+			"usage: \n"
+			"	export HEAP_TRACER='[options]'; LD_PRELOAD=./heap_tracer.so [userprogram]\n\n"
+			"options (space delimited):\n"
+			"	trace_calls\n"
+			"		traces all malloc/realloc/memalign/free calls\n"
+			"	trace_modul\n"
+			"		heap tracer verbose output (debug purposes)\n"
+			"	bracktrace\n"
+			"		collects backtrace data with backtrace_symbols() function\n"
+			"	backtrace_fd\n"
+			"		collects backtrace data with backtrace_symbols_fd() function\n"
+			"	check_boundaries\n"
+			"		checks memory over/underwrites, allocated areas are surrounded by eyecatcher\n"
+			"	locking\n"
+			"		locks heap tracer functions, usefull for multithread applications\n"
+			"	dump_limit=[bytes]\n"
+			"		limit for dumping size, default 64kb\n");
+		exit( 16);
+	}
+	
+	char *d;
 
-		printf("heap tracer environment settings '%s'\n", htenv);
-		if ((p = strstr(htenv, "progname=")) != NULL) {
-			sprintf(temp, "program name=%s", __progname);
-			if ((p = strstr(htenv, temp)) == NULL)
-				return;
-		}
-
-		memset(report_path, 0, sizeof(report_path));
-		if ((p = strstr(htenv, "report_path=")) != NULL)
-			for (d = report_path, p += 12; *p != '\0' && *p != ' '; p++, d++)
-				*d = *p;
-
-		if ((p = strstr(htenv, "trace_calls")) != NULL)
-			flag_set(htc->flag, FLAG_TRACE_HEAP_CALLS);
-
-		if ((p = strstr(htenv, "trace_modul")) != NULL)
-			flag_set(htc->flag, FLAG_TRACE_MODULE);
-
-		if ((p = strstr(htenv, "backtrace")) != NULL)
-			flag_set(htc->flag, FLAG_BACKTRACE);
-
-		if ((p = strstr(htenv, "backtrace_fd")) != NULL)
-			flag_set(htc->flag, FLAG_BACKTRACE | FLAG_BACKTRACE_FD);
-
-		if ((p = strstr(htenv, "check_boundaries")) != NULL)
-			flag_set(htc->flag, FLAG_CHECK_BOUNDARIES);
-
-		if ((p = strstr(htenv, "locking")) != NULL)
-			flag_set(htc->flag, FLAG_LOCKING);
+	printf("heap tracer environment settings '%s'\n", htenv);
+	if ((p = strstr(htenv, "progname=")) != NULL) {
+		sprintf(temp, "program name=%s", __progname);
+		if ((p = strstr(htenv, temp)) == NULL)
+			return;
 	}
 
-	flag_set( htc->flag, FLAG_ACTIVE);
+	memset(report_path, 0, sizeof(report_path));
+	if ((p = strstr(htenv, "report_path=")) != NULL)
+		for (d = report_path, p += 12; *p != '\0' && *p != ' '; p++, d++)
+			*d = *p;
+
+	if ((p = strstr(htenv, "trace_calls")) != NULL)
+		flag_set(htc->flag, FLAG_TRACE_HEAP_CALLS);
+
+	if ((p = strstr(htenv, "trace_modul")) != NULL)
+		flag_set(htc->flag, FLAG_TRACE_MODULE);
+
+	if ((p = strstr(htenv, "backtrace")) != NULL)
+		flag_set(htc->flag, FLAG_BACKTRACE);
+
+	if ((p = strstr(htenv, "backtrace_fd")) != NULL)
+		flag_set(htc->flag, FLAG_BACKTRACE | FLAG_BACKTRACE_FD);
+
+	if ((p = strstr(htenv, "check_boundaries")) != NULL)
+		flag_set(htc->flag, FLAG_CHECK_BOUNDARIES);
+
+	if ((p = strstr(htenv, "locking")) != NULL)
+		flag_set(htc->flag, FLAG_LOCKING);
+
+	htc->dump_limit = 64*1024;
+	if ((p = strstr(htenv, "dump_limit=")) != NULL)
+		htc->dump_limit = atoi( p + 11);
 
 	sprintf( temp, "%sheap_report_%s_%d.txt", report_path, __progname, getpid());
 	if ( ( htc->heap_report = fopen( temp, "w+t")) == NULL) {
 		printf( "unable to create heap report (%s)\n", temp);
 		exit( 16);
 	}
+
+	printf( "heap trace file is '%s'\n", temp);
 
 	trc( "heap trace file '%s' opened for\n", temp);
 	trc( "\texecutable       = '%s'\n", __progname);
@@ -209,7 +236,10 @@ static void prepare(void) {
 	trc( "\ttrace module     = %s\n", ( is_trace_module) ? "yes" : "no");
 	trc( "\tbounday check    = %s\n", ( is_check_boundaries) ? "yes" : "no");
 	trc( "\tlock             = %s\n", ( is_locking) ? "yes" : "no");
+	trc( "\tdump limit       = %d\n", htc->dump_limit);
 	trc( "\n");
+
+	flag_set( htc->flag, FLAG_ACTIVE);
 
 	if ( is_locking)
 		pthread_mutex_init(&htc->lock, NULL);
@@ -736,10 +766,7 @@ void __dump(const char *title, char *addr, size_t len) {
 
 	trc("DUMPING(%s): %p(%ld)\n", title, addr, len);
 
-	if (len > 65536) {
-		len = 65536;
-		trc("\t\tsize cut to 65536\n");
-	}
+	if ( htc->dump_limit && len > htc->dump_limit) len = htc->dump_limit;
 
 	if (memcheck(addr)) {
 		trc("\t\tpoints to illegal memory\n");
