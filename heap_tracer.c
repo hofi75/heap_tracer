@@ -87,6 +87,8 @@ typedef struct __heap_tracer_context {
 	int 				flag_backtrace;
 	int					bt_pipes[2];
 	size_t				dump_limit;
+	time_t				ignore_until;
+	int					ignore_from;
 } heap_tracer_context_t;
 
 #define is_active			flag_test( htc->flag, FLAG_ACTIVE)
@@ -183,8 +185,10 @@ static void prepare(void) {
 			"		checks memory over/underwrites, allocated areas are surrounded by eyecatcher\n"
 			"	locking\n"
 			"		locks heap tracer functions, usefull for multithread applications\n"
-			"	dump_limit=[bytes]\n"
-			"		limit for dumping size, default 64kb\n");
+			"	dump_limit=B\n"
+			"		limit for dumping size, default 64kb\n"
+			"	ignore_until=S\n"
+			"		ignore memory leaks where allocation was made in first S seconcs, default=0\n");
 		exit( 16);
 	}
 	
@@ -224,6 +228,10 @@ static void prepare(void) {
 	if ((p = strstr(htenv, "dump_limit=")) != NULL)
 		htc->dump_limit = atoi( p + 11);
 
+	htc->dump_limit = 64*1024;
+	if ((p = strstr(htenv, "ignore_until=")) != NULL)
+		htc->ignore_until = atoi( p + 13);
+
 	sprintf( temp, "%sheap_report_%s_%d.txt", report_path, __progname, getpid());
 	if ( ( htc->heap_report = fopen( temp, "w+t")) == NULL) {
 		printf( "unable to create heap report (%s)\n", temp);
@@ -241,7 +249,8 @@ static void prepare(void) {
 	trc( "\ttrace module     = %s\n", ( is_trace_module) ? "yes" : "no");
 	trc( "\tbounday check    = %s\n", ( is_check_boundaries) ? "yes" : "no");
 	trc( "\tlock             = %s\n", ( is_locking) ? "yes" : "no");
-	trc( "\tdump limit       = %d\n", htc->dump_limit);
+	trc( "\tdump limit       = %d bytes\n", htc->dump_limit);
+	trc( "\tignore until     = %d seconds\n", htc->ignore_until);
 	trc( "\n");
 
 	flag_set( htc->flag, FLAG_ACTIVE);
@@ -264,6 +273,7 @@ static void prepare(void) {
 		trc( "fcntl retcode = %d\n", retval);
 	}
 
+	htc->ignore_until += time( NULL);
 	htc->start_pid = getpid();
 
 	hooks_backup();
@@ -305,8 +315,12 @@ static int ae_compare_address( const void *node1, const void *node2)
 void ae_free_node( void *node)
 {
 	allocate_entry_t *ae = node;
+	int		traceit = 1;
 
-	if ( ae->addr != NULL)
+	if ( ae->addr == NULL) traceit = 0;
+	if ( ae->tp.tv_sec < htc->ignore_until) traceit = 0;
+	
+	if ( traceit)
 	{
 		struct tm ltime;
 		localtime_r( &ae->tp.tv_sec, &ltime);
@@ -343,11 +357,11 @@ static void unload(void) {
 #endif
 
 	trc( "number of unallocated entries : %d\n", htc->entries);
-	trc( "size   of unallocated entries : %ld MB\n",
-			(long) (htc->allocated / (1024 * 1024)));
+	trc( "size   of unallocated entries : %ld kB\n",
+			(long) (htc->allocated / (1024)));
 
 	trc( "max number of entries         : %d\n", htc->max_entries);
-	trc( "max memory usage              : %ld MB\n", (long) (htc->max_size / (1024 * 1024)));
+	trc( "max memory usage              : %ld kB\n", (long) (htc->max_size / (1024)));
 
 
 #ifdef __USE_TSEARCH
@@ -359,7 +373,7 @@ static void unload(void) {
 
 	for (sum = i = 0, ae = htc->table; i < htc->unused; i++, ae += 1)
 	{
-		if (ae->addr == NULL) continue;
+		if ( ae->addr == NULL) continue;
 
 		trc( "[%d][ID=%lld] area at %p with size %ld not freed\n", i, ae->id,
 				ae->addr, ae->size);
