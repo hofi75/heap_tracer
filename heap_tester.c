@@ -1,6 +1,9 @@
 
-#define _XOPEN_SOURCE
-#define _XOPEN_SOURCE_EXTENDED
+// #define _XOPEN_SOURCE
+// #define _XOPEN_SOURCE_EXTENDED
+
+#define _GNU_SOURCE     /* for RTLD_NEXT */
+#include <dlfcn.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +51,8 @@ int allocator( void)
 		size = rand() % ALLOC_MAX_SIZE;
 		addr[addrs] = malloc( size);
 		memset( addr[addrs], 'A' + rand() % 26, size);
+		memcpy( (( char *)addr[addrs]) + size, "WRONG", 5);
+		memcpy( (( char *)addr[addrs]) - 5, "WRONG", 5);
 		addrs++;
     	break;
     case 2: /* realloc */
@@ -109,9 +114,14 @@ static int compare( const void *p1, const void *p2)
 
 int main( void)
 {
+	void *handle;
 	int i;
 
-    for( i = 0; i < 10000; i++)
+	// handle = dlopen( 0, RTLD_LOCAL | RTLD_LAZY);
+	// printf( "handle = %p\n", handle);
+	int (*ht_boundary_check)(int) = dlsym( RTLD_NEXT, "ht_boundary_check");
+
+    for( i = 0; i < 1000; i++)
     {
     	RECURSIVE_FUNCTION_BODY
 		// printf( "%d,", i);
@@ -123,6 +133,8 @@ int main( void)
 	for( i = 0; i < addrs; i++)
 		printf( "%p, ", addr[i]);
 	printf( "\n");
+
+	(*ht_boundary_check)(0);
 
 	return 0;
 }

@@ -65,9 +65,13 @@ typedef struct __allocate_entry {
 #endif
 	char 				checkstring[SIZE_CHECK_AREA];
 	char 				backtrace[SIZE_BACKTRACE_STRING];
-	char				*cs_right;
-	char				cs_left[SIZE_CHECK_AREA];
+	char				*cs_trailer;
+	char				cs_header[SIZE_CHECK_AREA];
 } allocate_entry_t;
+
+#define AE_TRCF "%p,id=%lld,addr=%p,size=%ld"
+#define AE_TRCI( __ae) \
+	__ae, __ae->id, __ae->addr, __ae->size
 
 typedef struct __heap_tracer_context {
 	FILE 				*heap_report;
@@ -102,6 +106,7 @@ typedef struct __heap_tracer_context {
 	time_t				ignore_until;
 	int					ignore_from;
 } heap_tracer_context_t;
+
 
 #define is_active			flag_test( htc->flag, FLAG_ACTIVE)
 #define is_trace_calls		flag_test( htc->flag, FLAG_TRACE_HEAP_CALLS)
@@ -314,6 +319,24 @@ void ht_open(void)
 	hooks_setmine();
 }
 
+void ht_boundary_check_action( 
+	const void 	*node,
+	VISIT		type,
+	int			level)
+{
+	allocate_entry_t 	*ae = *( allocate_entry_t **) node;
+
+	/* nothing to do? */
+	if ( type != leaf && type != preorder) return;
+	check_boundaries( ae);
+}
+
+extern "C" int ht_boundary_check(int x)
+{
+	trc( "check boundaries...\n");
+	twalk( troot, &ht_boundary_check_action);
+}
+
 static int ae_compare_id( const void *node1, const void *node2) {
 	allocate_entry_t *ae1 = (allocate_entry_t *) node1;
 	allocate_entry_t *ae2 = (allocate_entry_t *) node2;
@@ -523,6 +546,8 @@ allocate_entry_t * add_ae( allocate_entry_t *ae, size_t size) {
 	ae->intervalID = htc->intervalID;
 	clk_id = CLOCK_REALTIME_COARSE;
   	result = clock_gettime( clk_id, &ae->tp);
+	if ( is_check_boundaries)
+		set_checkstring( ae);
 
 	/* save in binary three */
 	ae = *( allocate_entry_t **) tsearch( ( void *) ae, &troot, &ae_compare_address);
@@ -581,7 +606,7 @@ static void *ht_malloc( size_t size, const void *caller)
 {
 	char *addr;
 	allocate_entry_t *ae;
-	size_t alloc_size = size + sizeof( allocate_entry_t);
+	size_t alloc_size = size + sizeof( allocate_entry_t) + SIZE_CHECK_AREA;
 
 	HT_LOCK;
 	hooks_restore();
@@ -604,7 +629,7 @@ static void *ht_malloc( size_t size, const void *caller)
 
 static void *ht_memalign( size_t alignment, size_t size, const void *caller) {
 	allocate_entry_t *ae;
-	size_t alloc_size = size + sizeof( allocate_entry_t);
+	size_t alloc_size = size + sizeof( allocate_entry_t) + SIZE_CHECK_AREA;
 
 	HT_LOCK;
 	hooks_restore();
@@ -614,7 +639,6 @@ static void *ht_memalign( size_t alignment, size_t size, const void *caller) {
 	ae = ( allocate_entry_t *) memalign( alignment, alloc_size);
 	add_ae( ae, size);
 	generate_backtrace_string( ae->backtrace);
-	// set_checkstring( ae);
 
 	if ( is_trace_calls) trc("+ (MEMALIGN) %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 
@@ -630,7 +654,7 @@ static void *ht_realloc( void *ptr, size_t size, const void *caller)
 {
 	char 				*addr;
 	allocate_entry_t 	*ae = NULL;
-	size_t 				alloc_size = size + sizeof( allocate_entry_t);
+	size_t 				alloc_size = size + sizeof( allocate_entry_t) + SIZE_CHECK_AREA;
 	char 				bts[SIZE_BACKTRACE_STRING];
 
 	HT_LOCK;
@@ -654,7 +678,6 @@ static void *ht_realloc( void *ptr, size_t size, const void *caller)
 		trc("+ (REALLOC) %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 	}
 
-	// set_checkstring( ae);
 	if ( is_trace_module) trc("%s( %p, %ld) <-- %p\n", __FUNCTION__, ptr, size, ae->addr);
 
 	hooks_setmine();
@@ -715,7 +738,7 @@ void __dump(const char *title, char *addr, size_t len) {
 		return;
 	}
 
-	sprintf(s1, "%p - %.8X: ", p, 0);
+	sprintf(s1, "%p(%.8X): ", p, 0);
 	strcpy(s2, "\0");
 	s4[1] = '\0';
 	for (i = 0; i < len; i++) {
@@ -741,13 +764,13 @@ void __dump(const char *title, char *addr, size_t len) {
 
 		if (i % 32 == 31) {
 			trc("%s  >%s<\n", s1, s2);
-			sprintf(s1, "%p - %.8X: ", p, i + 1);
+			sprintf(s1, "%p(%.8X): ", p, i + 1);
 			strcpy(s2, "\0");
 		}
 	}
 
 	if (strlen(s2) != 0)
-		trc("%-128s  >%s<\n", s1, s2);
+		trc("%-128s >%s<\n", s1, s2);
 
 	trc("\n");
 	fflush(htc->heap_report);
@@ -807,7 +830,7 @@ void ht_collect_action(
 	if ( !( dump_intervalID == -1 || ae->intervalID == dump_intervalID)) return;
 
 	/* never dump warmup entries */
-	if ( ae->intervalID == 0) return;
+	// if ( ae->intervalID == 0) return;
 
 	ae_sort_table[ae_sort_size].ID = ae->id;
 	ae_sort_table[ae_sort_size].ae = ae;
@@ -850,7 +873,6 @@ int ht_dump_entries( size_t intervalID)
 	for( int i = 0; i < ae_sort_size; i++)
 	{
 		ae = ae_sort_table[i].ae;
-
 
 		if ( strstr( ae->backtrace, "libuccache.so") != NULL) continue;
 
@@ -974,8 +996,12 @@ int set_checkstring(allocate_entry_t *ae) {
 	sprintf(temp, "#*#*%p<***>%.10ld#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*",
 				ae->addr, ae->size);
 	memcpy( ae->checkstring, temp, SIZE_CHECK_AREA);
-	memcpy( ae->cs_left,  ae->checkstring, SIZE_CHECK_AREA);
-	memcpy( ae->cs_right, ae->checkstring, SIZE_CHECK_AREA);
+
+	memcpy( ae->cs_header,  ae->checkstring, SIZE_CHECK_AREA);
+	ae->cs_trailer = (( char *) ae->addr) + ae->size;
+	memcpy( ae->cs_trailer, ae->checkstring, SIZE_CHECK_AREA);
+
+	trc( "header=%p, trailer=%p");
 
 	return 0;
 }
@@ -985,14 +1011,16 @@ int check_boundaries(allocate_entry_t *ae) {
 
 	if (!is_check_boundaries) return 0;
 
+	trc( "checking " AE_TRCF "\n", AE_TRCI( ae));
+
 	if (ae == NULL)	return 0;
 
-	if ( memcmp(ae->cs_left, ae->checkstring, SIZE_CHECK_AREA) != 0) {
-		trc("memory buffer HEADER check string corrupted...\n");
+	if ( memcmp(ae->cs_header, ae->checkstring, SIZE_CHECK_AREA) != 0) {
+		trc( "memory buffer HEADER check string corrupted...\n");
 		corrupted = 1;
 	}
 
-	if ( memcmp( ae->cs_right, ae->checkstring, SIZE_CHECK_AREA) != 0) {
+	if ( memcmp( ae->cs_trailer, ae->checkstring, SIZE_CHECK_AREA) != 0) {
 		trc("memory buffer TRAILER check string corrupted...\n");
 		corrupted = 1;
 	}
@@ -1001,9 +1029,9 @@ int check_boundaries(allocate_entry_t *ae) {
 		trc( "\taddr      = %p\n", ae->addr);
 		trc( "\tsize      = %ld\n", ae->size);
 		trc( "\nbacktrace = %s\n", ae->backtrace);
-		__dump( "CHECKSTRING", ae->checkstring, SIZE_CHECK_AREA);
-		__dump( "LEFT", ( char *) ae->cs_left, SIZE_CHECK_AREA);
-		__dump( "RIGHT", ( char *) ae->cs_right, SIZE_CHECK_AREA);
+		__dump( "CHECK-STRING", ae->checkstring, SIZE_CHECK_AREA);
+		__dump( "CS-HEADER", ( char *) ae->cs_header, SIZE_CHECK_AREA);
+		__dump( "CS-TRAILER", ( char *) ae->cs_trailer, SIZE_CHECK_AREA);
 		// __dump( "FULL", ( char *) ae->real_addr, ae->size + SIZE_CHECK_AREA * 2);
 	}
 

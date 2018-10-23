@@ -3,3 +3,4 @@ my-leaky-program
 *.o
 # heap_tracer.so
 libunwind*
+core*
