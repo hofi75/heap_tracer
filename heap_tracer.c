@@ -6,7 +6,7 @@
 #endif
 
 #define _POSIX_SOURCE
-#define __USE_LIBUNWIND
+// #define __USE_LIBUNWIND
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +29,7 @@
 
 #include <time.h>
 #include <stdint.h>
+#define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #include <pthread.h>
 #include <time.h>
@@ -36,7 +37,7 @@
 #ifdef __USE_LIBUNWIND
 #   define UNW_LOCAL_ONLY
 #   include <libunwind.h>
-// #   include <cxxabi.h>
+#   include <cxxabi.h>
 #endif
 
 #define flag_set( _flag, _mask) \
@@ -47,21 +48,25 @@
    ( _flag & ( _mask))
 
 #define SIZE_CHECK_AREA				32
-#define SIZE_BACKTRACE_STRING		8192
+#define SIZE_BACKTRACE_STRING		4096
 
 typedef struct __allocate_entry {
 	char 				eyec[4];
 	unsigned long long 	id;
 	void 				*addr;			// points to user memory
-	void 				*real_addr;		// points to libc allocated memory
-	void 				*trailer_cs;	// trailer check string
+	// void 				*real_addr;		// points to libc allocated memory
 	size_t 				size;
 	pid_t				pid;
 	int					intervalID;
 	char				timestamp[48];
   	struct timespec 	tp;
+#ifdef __USE_LIBUNWIND
+// 	unw_cursor_t 		bt_cursor[64];
+#endif
 	char 				checkstring[SIZE_CHECK_AREA];
 	char 				backtrace[SIZE_BACKTRACE_STRING];
+	char				*cs_right;
+	char				cs_left[SIZE_CHECK_AREA];
 } allocate_entry_t;
 
 typedef struct __heap_tracer_context {
@@ -72,7 +77,7 @@ typedef struct __heap_tracer_context {
 	int 				max_entries;
 	int 				max_size;
 	int					nof_invalid_free;
-	int 				size;
+	// int 				size;
 	unsigned long long 	id;
 	pthread_mutex_t 	lock;
 	pid_t				start_pid;
@@ -92,6 +97,7 @@ typedef struct __heap_tracer_context {
 	int					intervalID;
 	size_t				dump_limit;
 	size_t				dump_interval;
+	size_t				ignore_interval;
 	time_t				dump_next;
 	time_t				ignore_until;
 	int					ignore_from;
@@ -109,7 +115,7 @@ typedef struct __heap_tracer_context {
 static void prepare(void) __attribute__((constructor));
 static void unload(void) __attribute__((destructor));
 
-void generate_backtrace_string(char *result, const void *caller);
+void generate_backtrace_string(char *result);
 
 int set_checkstring	(allocate_entry_t *ae);
 int check_boundaries(allocate_entry_t *ae);
@@ -122,11 +128,10 @@ extern const char *__progname;
 static	void *troot = NULL;
 
 /* Prototypes for our hooks.  */
-static void my_init_hook(void);
-static void *my_malloc_hook(size_t, const void *);
-static void *my_memalign_hook(size_t, size_t, const void *);
-static void *my_realloc_hook(void *, size_t, const void *);
-static void my_free_hook(void *, const void *);
+static void *ht_malloc(size_t, const void *);
+static void *ht_memalign(size_t, size_t, const void *);
+static void *ht_realloc(void *, size_t, const void *);
+static void  ht_free(void *, const void *);
 
 /* Variables to save original hooks. */
 static void *(*old_malloc_hook)(size_t, const void *);
@@ -135,7 +140,6 @@ static void *(*old_realloc_hook)(void *, size_t, const void *);
 static void (*old_free_hook)(void *, const void *);
 
 int memcheck(void *x);
-int	dump_interval( const char *backtrace_string);
 
 void hooks_backup(void);
 void hooks_restore(void);
@@ -159,24 +163,22 @@ static void (*real_free) (void *ptr) = 0;
 static void *(*real_realloc) (void *ptr, size_t size) = 0;
 static void *(*real_calloc) (size_t nmemb, size_t size) = 0;
 
-/*
-static void init_me()
-{
-    real_malloc = dlsym(RTLD_NEXT, "malloc");
-    real_calloc = dlsym(RTLD_NEXT, "calloc");
-    real_free   = dlsym(RTLD_NEXT, "free");
-    real_realloc = dlsym(RTLD_NEXT, "realloc");
-}
-*/
+void ht_close			( void);
+void ht_open			( void);
+int  ht_interval_shift	( int all);
+int  ht_dump_entries	( size_t intervalID);
 
 static void prepare(void) {
+	ht_open();
+}
+
+void ht_open(void) 
+{
 	char *htenv, *p, temp[256], report_path[256];
 	struct sigaction sa;
 
 	memset( htc, 0, sizeof( heap_tracer_context_t));
 	strcpy( report_path, "");
-
-	// init_me();
 
 	// check if our program name is defined in HEAP_TRACER
 	htenv = getenv( HT_ENV);
@@ -205,12 +207,16 @@ static void prepare(void) {
 			"		limit for dumping size, default 64kb\n"
 			"	ignore_until=S\n"
 			"		ignore memory leaks where allocation was made in first S seconcs, default=0\n"
+			"	ignore_interval=N\n"
+			"		ignore dumping first N interval, default=0 --> all\n"
 			"	dump_interval=S\n"
 			"		dumps allocations within specified interval, default=0\n");
-		exit( 16);
+		return;
 	}
 	
 	char *d;
+
+	printf( "size of allocate_entry_t = %ld\n", sizeof( allocate_entry_t));
 
 	printf("heap tracer environment settings '%s'\n", htenv);
 	if ((p = strstr(htenv, "progname=")) != NULL) {
@@ -259,6 +265,10 @@ static void prepare(void) {
 	if ((p = strstr(htenv, "dump_interval=")) != NULL)
 		htc->dump_interval = atoi( p + 14);
 
+	htc->ignore_interval = 0;
+	if ((p = strstr(htenv, "ignore_interval=")) != NULL)
+		htc->ignore_interval = atoi( p + 16);
+
 	sprintf( temp, "%sheap_report_%s_%d.txt", report_path, __progname, getpid());
 	if ( ( htc->heap_report = fopen( temp, "w+t")) == NULL) {
 		printf( "unable to create heap report (%s)\n", temp);
@@ -279,6 +289,7 @@ static void prepare(void) {
 	trc( "\tlock                  = %s\n", ( is_locking) ? "yes" : "no");
 	trc( "\tdump limit            = %d bytes\n", htc->dump_limit);
 	trc( "\tdump interval         = %d seconds\n", htc->dump_interval);
+	trc( "\tignore interval       = %d\n", htc->ignore_interval);
 	trc( "\tignore until          = %d seconds\n", htc->ignore_until);
 	trc( "\n");
 
@@ -286,13 +297,6 @@ static void prepare(void) {
 
 	if ( is_locking)
 		pthread_mutex_init(&htc->lock, NULL);
-
-	// allocate entries for allocate table
-/* #ifndef __USE_TSEARCH
-	htc->size = 256 * 1024;
-	htc->table = (allocate_entry_t *) malloc( SIZE_TABLE);
-	memset(htc->table, 0, SIZE_TABLE);
-#endif */
 
 	if ( is_backtrace_fd)
 	{
@@ -310,7 +314,7 @@ static void prepare(void) {
 	hooks_setmine();
 }
 
-static int ae_compare_id(const void *node1, const void *node2) {
+static int ae_compare_id( const void *node1, const void *node2) {
 	allocate_entry_t *ae1 = (allocate_entry_t *) node1;
 	allocate_entry_t *ae2 = (allocate_entry_t *) node2;
 
@@ -342,33 +346,13 @@ static int ae_compare_address( const void *node1, const void *node2)
 	return rslt;
 }
 
-void ae_free_node( void *node)
+static void unload(void) 
 {
-	allocate_entry_t *ae = node;
-	int				 traceit = 1;
-
-	if ( ae->addr == NULL) traceit = 0;
-	if ( ae->tp.tv_sec < htc->ignore_until) traceit = 0;
-	
-	if ( traceit)
-	{
-		struct tm ltime;
-		localtime_r( &ae->tp.tv_sec, &ltime);
-		sprintf( ae->timestamp, "%.4d%.2d%.2d/%.2d%.2d%.2d.%ld", 
-			ltime.tm_year + 1900, ltime.tm_mon + 1, ltime.tm_mday,
-			ltime.tm_hour, ltime.tm_min, ltime.tm_sec, 
-			ae->tp.tv_nsec);
-		trc("[ID=%lld] area at %p with size %ld not freed (pid=%d), timestamp=%s\n",
-				ae->id, ae->addr, ae->size, ae->pid, ae->timestamp);
-		trc("   backtrace = \n%s\n", ae->backtrace);
-		__dump("AREA", ae->addr, ae->size);
-	}
-
-	free( node);
+	ht_close();
 }
 
-static void unload(void) {
-
+void ht_close( void)
+{
 	int i;
 	size_t sum;
 	allocate_entry_t *ae;
@@ -378,7 +362,7 @@ static void unload(void) {
 	hooks_restore();
 
 	trc_delimiter_line();
-	trc( "SUMMARY REPORT: %d\n");
+	trc( "-=>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> FINAL SUMMARY REPORT <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<=-\n");
 	trc_delimiter_line();
 	trc( "number of unallocated entries : %d\n", htc->entries);
 	trc( "size   of unallocated entries : %ld kB\n",
@@ -389,7 +373,10 @@ static void unload(void) {
 	trc( "number of invalid free calls  : %d\n", htc->nof_invalid_free);
 	trc_delimiter_line();
 
-	tdestroy( troot, &ae_free_node);
+	/* dump all enties */
+	ht_dump_entries( -1);
+
+	tdestroy( troot, &free);
 
 	fclose( htc->heap_report);
 	if ( is_backtrace_fd)
@@ -404,52 +391,58 @@ static void unload(void) {
 void * array[BT_ARRAY_SIZE];
 
 #ifdef __USE_LIBUNWIND
-void generate_backtrace_string( char *result, const void *caller)
+void generate_backtrace_string( char *result)
 {
-  unw_cursor_t cursor;
-  unw_context_t context;
+	unw_cursor_t cursor;
+	unw_context_t context;
 
-  unw_getcontext(&context);
-  unw_init_local(&cursor, &context);
+	*result = '\0';
+	if (!is_backtrace) return;
 
-  int n=0, i=0, l = SIZE_BACKTRACE_STRING, x;
-  char *p;
+  	unw_getcontext( &context);
+  	unw_init_local( &cursor, &context);
+
+  	int n=0, i=0, l = SIZE_BACKTRACE_STRING, x;
+  	char *p;
    
-	// for ( l = SIZE_BACKTRACE_STRING, p = result, i = 2; i < size && messages[i] != NULL; ++i) 
-  p = result;
-  while ( unw_step(&cursor) ) {
-    unw_word_t ip, sp, off;
+	p = result;
+	while ( unw_step( &cursor) ) 
+	// while ( unw_step( &cursor) ) 
+	{
+		unw_word_t ip, sp, off;
 
-    unw_get_reg(&cursor, UNW_REG_IP, &ip);
-    unw_get_reg(&cursor, UNW_REG_SP, &sp);
+		// unw_get_reg( &cursor, UNW_REG_IP, &ip);
+		// unw_get_reg( &cursor, UNW_REG_SP, &sp);
 
-    char symbol[256] = {"<unknown>"};
-    char *name = symbol;
+		char symbol[256] = {"<unknown>"};
+		char *name = symbol;
 
-    if ( !unw_get_proc_name( &cursor, symbol, sizeof(symbol), &off) ) {
-      int status;
-      /* if ( (name = abi::__cxa_demangle(symbol, NULL, NULL, &status)) == 0 )
-        name = symbol; */
-    }
+		if ( !unw_get_proc_name( &cursor, symbol, sizeof(symbol), &off) ) {
+			int status;
+			if ( (name = abi::__cxa_demangle(symbol, NULL, NULL, &status)) == 0 ) name = symbol;
+		}
 
-	/*
-    printf("#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
+    	x = snprintf( p, l, "\t\t#%.2d " " %s + 0x%" PRIxPTR "\n",
+        			++n, name, static_cast<uintptr_t>(off));
+ /*
+    x = snprintf( p, l, "\t\t#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
         ++n,
         static_cast<uintptr_t>(ip),
         static_cast<uintptr_t>(sp),
         name,
-        static_cast<uintptr_t>(off));
-		*/
+        static_cast<uintptr_t>(off)); */
 
-	x = snprintf( p, l, "\t\t(%2d) - %s\n", i, name);
-	p += x;
-	l -= x;
-	i++;
-    if ( name != symbol) free( name);
-  }
+	// x = snprintf( p, l, "\t\t(%2d) - %s\n", i, name);
+		p += x;
+		l -= x;
+		i++;
+    	if ( name != symbol) free( name);
+  	}
+    
+	snprintf( p, l, "\t\tstring size = %ld\n", strlen( result));  
 }
 #else
-void generate_backtrace_string( char *result, const void *caller) {
+void generate_backtrace_string( char *result) {
 	char **messages;
 	char *p;
 	int size, i, l, x;
@@ -506,170 +499,102 @@ void hooks_restore(void) {
 }
 
 void hooks_setmine(void) {
-	__malloc_hook = my_malloc_hook;
-	__memalign_hook = my_memalign_hook;
-	__realloc_hook = my_realloc_hook;
-	__free_hook = my_free_hook;
+	__malloc_hook = ht_malloc;
+	__memalign_hook = ht_memalign;
+	__realloc_hook = ht_realloc;
+	__free_hook = ht_free;
 }
 
-allocate_entry_t * table_add_entry( char *addr, size_t size) {
-	allocate_entry_t *new_ae, *ae;
+allocate_entry_t * add_ae( allocate_entry_t *ae, size_t size) {
 
-  	int result;
+  	int 			result;
   	struct timespec tp;
-	struct tm ltime;
-	clockid_t clk_id;
+	struct tm 		ltime;
+	clockid_t 		clk_id;
 
-	if ( is_trace_module)
-		trc("%s(%p,%ld,troot=%p) -->\n", __FUNCTION__, addr, size, troot);
+	if ( is_trace_module) trc("%s(ae=%p, address=%p, %ld,troot=%p) -->\n", __FUNCTION__, ae, ( ae + 1), size, troot);
 
-	// save in table
-	new_ae = malloc( sizeof( allocate_entry_t));
-	memcpy( new_ae->eyec, "%%AE", 4);
-	new_ae->real_addr = addr;
-	if ( is_check_boundaries) {
-		new_ae->addr = addr + SIZE_CHECK_AREA;
-		new_ae->trailer_cs = addr + size + SIZE_CHECK_AREA;
-	} else
-		new_ae->addr = addr;
-	new_ae->size = size;
-	new_ae->id = htc->id++;
-	new_ae->pid = getpid();
+	memcpy( ae->eyec, "%%AE", 4);
+	ae->addr = ( void *) ( ae + 1);
+	ae->size = size;
+	ae->id = htc->id++;
+	ae->pid = getpid();
 	htc->allocated += size;
-	new_ae->intervalID = htc->intervalID;
-
-	// if ( is_trace_module) trc( "AE created = %p\n", ae);
-
+	ae->intervalID = htc->intervalID;
 	clk_id = CLOCK_REALTIME_COARSE;
-  	result = clock_gettime( clk_id, &new_ae->tp);
+  	result = clock_gettime( clk_id, &ae->tp);
 
+	/* save in binary three */
+	ae = *( allocate_entry_t **) tsearch( ( void *) ae, &troot, &ae_compare_address);
 
-	ae = *( allocate_entry_t **)
-			tsearch( ( void *) new_ae, &troot, &ae_compare_address);
+	/* update statistics */
 	htc->entries++;
-	if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
-	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
+	if ( htc->entries > htc->max_entries) 	htc->max_entries = htc->entries;
+	if ( htc->allocated > htc->max_size) 	htc->max_size = htc->allocated;
 
-	if ( is_trace_module)
-		trc("%s <-- (new_ae=%p, ae=%p, troot=%p)\n", __FUNCTION__, new_ae, ae, troot);
+	if ( is_trace_module) trc( "%s <-- (ae=%p, troot=%p)\n", __FUNCTION__, ae, troot);
 
-	return new_ae;
+	return ae;
 }
 
-void * table_remove_entry( void *addr, const char *backtrace)
+allocate_entry_t * remove_ae( void *addr)
 {
-	int 			 i, found = 0;
+	int 			 	i, found = 0;
 	allocate_entry_t	ssearch_ae;
 	allocate_entry_t 	*search_ae = &ssearch_ae, *ae;
-	void				*rslt;
 
-	if ( is_trace_module)
-		trc("%s(%p,troot=%p) -->\n", __FUNCTION__, addr, troot);
+	if ( is_trace_module) trc("%s(%p,troot=%p) -->\n", __FUNCTION__, addr, troot);
 
-	if ( addr == NULL) return NULL;
+	if ( addr == NULL) return ( allocate_entry_t *) NULL;
 		
 	/* search by address */
 	memset( search_ae, 0, sizeof( allocate_entry_t));
 	search_ae->addr = addr;
-	if ( is_trace_module)
-		trc("tfind(search_ae=%p,addr=%p)\n", search_ae, search_ae->addr);
+
+	if ( is_trace_module) trc( "tfind(search_ae=%p,addr=%p)\n", search_ae, search_ae->addr);
 	void *x = tfind( ( void *) search_ae, &troot, &ae_compare_address);
 	if ( !x)
 	{
-		trc("? (FREE/REALLOC)(NOT FOUND) - / %p  ==> \n%s\n", addr, backtrace);
-		return NULL;
+		trc("? (tfind - NOT found) - / %p  ==> \n%s\n", addr, backtrace);
+		return ( allocate_entry_t *) NULL;
 	}
+
 	ae = *( allocate_entry_t **) x;
-	if ( is_trace_module)
-		trc("tdelete(search_ae=%p,addr=%p)\n", ae, ae->addr);
+	if ( is_trace_module) trc( "tdelete(search_ae=%p,addr=%p)\n", ae, ae->addr);
 	if ( tdelete( ( void *) ae, &troot, &ae_compare_address) == NULL)
 	{
 		trc( "tdelete error!!!!");
 		exit( 16);
 	}
-	rslt = ae->real_addr;
+
+	/* update statistics */
 	htc->entries--;
-	// if ( htc->entries > htc->max_entries) htc->max_entries = htc->entries;
 	htc->allocated -= ae->size;
 	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
-	free( ae);
 
-	if ( is_trace_module)
-		trc("%s <-- (rslt=%p,troot=%p)\n", __FUNCTION__, rslt, troot);
+	if ( is_trace_module) trc( "%s <-- (ae=%p,troot=%p)\n", __FUNCTION__, ae, troot);
 
-	return rslt;
+	return ae;
 }
 
-static void *my_malloc_hook(size_t size, const void *caller)
+static void *ht_malloc( size_t size, const void *caller)
 {
 	char *addr;
 	allocate_entry_t *ae;
-	size_t alloc_size;
+	size_t alloc_size = size + sizeof( allocate_entry_t);
 
 	HT_LOCK;
 	hooks_restore();
 
-	if ( is_trace_module)
-		trc("%s( %ld) -->\n", __FUNCTION__, size);
+	if ( is_trace_module) trc("%s( %ld) -->\n", __FUNCTION__, size);
 
-	alloc_size = size;
-	if ( is_check_boundaries)
-		alloc_size += SIZE_CHECK_AREA * 2;
+	ae = ( allocate_entry_t *) malloc( alloc_size);
+	add_ae( ae, size);
+	generate_backtrace_string( ae->backtrace);
 
-	if (old_malloc_hook != NULL)
-		addr = (__ptr_t) (*old_malloc_hook)( alloc_size, caller);
-	else
-		addr = (__ptr_t) malloc( alloc_size);
+	if ( is_trace_calls) trc("+ (MALLOC)  %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 
-	ae = table_add_entry( addr, size);
-	generate_backtrace_string( ae->backtrace, caller);
-
-	if ( is_trace_calls)
-		trc("+ (MALLOC)  %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
-
-	set_checkstring( ae);
-
-	if ( is_trace_module)
-		trc("%s() <-- %p\n", __FUNCTION__, addr);
-
-	hooks_setmine();
-	HT_UNLOCK;
-
-	// return address
-	return ae->addr;
-}
-
-static void *my_memalign_hook(size_t alignment, size_t size, const void *caller) {
-	char *addr;
-	allocate_entry_t *ae;
-	size_t alloc_size;
-
-	HT_LOCK;
-	hooks_restore();
-
-	if ( is_trace_module)
-		trc("%s( %d, %ld) -->\n", __FUNCTION__, alignment, size);
-
-	if ( is_check_boundaries)
-		alloc_size = size + SIZE_CHECK_AREA * 2;
-	else
-		alloc_size = size;
-
-	if (old_memalign_hook != NULL)
-		addr = (__ptr_t) (*old_memalign_hook)(alignment, alloc_size, caller);
-	else
-		addr = (__ptr_t) memalign( alignment, alloc_size);
-
-	ae = table_add_entry( addr, size);
-	generate_backtrace_string( ae->backtrace, caller);
-	set_checkstring( ae);
-
-	if ( is_trace_calls)
-		trc("+ (MEMALIGN) %10ld / %8p  ==> \n%s\n", size, ae->addr,
-				ae->backtrace);
-
-	if ( is_trace_module)
-		trc("%s( %d, %ld) <-- %p\n", __FUNCTION__, alignment, size, addr);
+	if ( is_trace_module) trc("%s() <-- %p\n", __FUNCTION__, addr);
 
 	hooks_setmine();
 	HT_UNLOCK;
@@ -677,43 +602,60 @@ static void *my_memalign_hook(size_t alignment, size_t size, const void *caller)
 	return ae->addr;
 }
 
-static void *my_realloc_hook(void *ptr, size_t size, const void *caller)
+static void *ht_memalign( size_t alignment, size_t size, const void *caller) {
+	allocate_entry_t *ae;
+	size_t alloc_size = size + sizeof( allocate_entry_t);
+
+	HT_LOCK;
+	hooks_restore();
+
+	if ( is_trace_module) trc("%s( %d, %ld) -->\n", __FUNCTION__, alignment, size);
+
+	ae = ( allocate_entry_t *) memalign( alignment, alloc_size);
+	add_ae( ae, size);
+	generate_backtrace_string( ae->backtrace);
+	// set_checkstring( ae);
+
+	if ( is_trace_calls) trc("+ (MEMALIGN) %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
+
+	if ( is_trace_module) trc("%s( %d, %ld) <-- %p\n", __FUNCTION__, alignment, size, ae->addr);
+
+	hooks_setmine();
+	HT_UNLOCK;
+
+	return ae->addr;
+}
+
+static void *ht_realloc( void *ptr, size_t size, const void *caller)
 {
-	void 				*addr;
-	allocate_entry_t 	*ae;
-	size_t 				alloc_size;
+	char 				*addr;
+	allocate_entry_t 	*ae = NULL;
+	size_t 				alloc_size = size + sizeof( allocate_entry_t);
 	char 				bts[SIZE_BACKTRACE_STRING];
 
 	HT_LOCK;
 	hooks_restore();
 
-	if ( is_trace_module)
-		trc("%s( %p, %ld) -->\n", __FUNCTION__, ptr, size);
+	if ( is_trace_module) trc("%s( %p, %ld) -->\n", __FUNCTION__, ptr, size);
 
-	generate_backtrace_string( bts, caller);
-	addr = table_remove_entry( ptr, bts);
+	if ( ptr)
+	{
+		ae = ( allocate_entry_t *) remove_ae( ptr);
+		// if ( ae == NULL) return 0;
+		// generate_backtrace_string( bts);
+	}
 
-	if ( is_check_boundaries)
-		alloc_size = size + SIZE_CHECK_AREA * 2;
-	else
-		alloc_size = size;
-
-	if (old_realloc_hook != NULL)
-		addr = (__ptr_t) (*old_realloc_hook)( addr, alloc_size, caller);
-	else
-		addr = (__ptr_t) realloc( addr, alloc_size);
-
-	ae = table_add_entry( addr, size);
-	generate_backtrace_string( ae->backtrace, caller);
+	ae = ( allocate_entry_t *) realloc( ( void *) ae, alloc_size);
+	add_ae( ae, size);
+	generate_backtrace_string( ae->backtrace);
 
 	if ( is_trace_calls) {
 		trc("- (REALLOC)          - / %8p  ==> \n%s\n", ptr, ae->backtrace);
 		trc("+ (REALLOC) %10ld / %8p  ==> \n%s\n", size, ae->addr, ae->backtrace);
 	}
 
-	set_checkstring( ae);
-	if ( is_trace_module)
-		trc("%s( %p, %ld) <-- %p\n", __FUNCTION__, ptr, size, ae->addr);
+	// set_checkstring( ae);
+	if ( is_trace_module) trc("%s( %p, %ld) <-- %p\n", __FUNCTION__, ptr, size, ae->addr);
 
 	hooks_setmine();
 	HT_UNLOCK;
@@ -721,29 +663,29 @@ static void *my_realloc_hook(void *ptr, size_t size, const void *caller)
 	return ae->addr;
 }
 
-static void my_free_hook(void *ptr, const void *caller)
+static void ht_free(void *ptr, const void *caller)
 {
-	char 	bts[SIZE_BACKTRACE_STRING];
-	void	*addr;
+	char 				bts[SIZE_BACKTRACE_STRING];
+	allocate_entry_t	*ae;
 
 	HT_LOCK;
 	hooks_restore();
 
 	if ( is_trace_calls) trc("%s(%p) -->\n", __FUNCTION__, ptr);
 
-	generate_backtrace_string( bts, caller);
-
-	addr = table_remove_entry( ptr, bts);
-	if ( addr == NULL)
+	ae = remove_ae( ptr);
+	if ( ae == NULL)
 	{
-		/* ignore ZUDATZT... */
-		if ( strstr( bts, "./libzu00132.so(ZUDATZT_Now2+0x1c)") == NULL)
+		/*
+		generate_backtrace_string( bts);
+		if ( strstr( bts, "ZUDATZT_Now2 + 0x1c") == NULL)
 		{
 			trc_delimiter_line();
 			trc( "***** Invalid free for address(%p), entry not found by heap_tracer ***** \n", ptr);
 			trc( "BackTrace: \n%s\n", bts);
 			htc->nof_invalid_free ++;
 		}
+		*/
 
 		if ( is_trace_module) trc("%s <--\n", __FUNCTION__);
 		hooks_setmine();
@@ -751,14 +693,9 @@ static void my_free_hook(void *ptr, const void *caller)
 		return;
 	}
 
-	if (old_free_hook != NULL)
-		(*old_free_hook)( addr, caller);
-	else
-		free( addr);
+	free( ( void *) ae);
 
-	dump_interval( bts);
-
-	if ( is_trace_calls) trc("%s(%p,allocate_entry=%p) <--\n", __FUNCTION__, ptr, addr);
+	if ( is_trace_calls) trc("%s(%p,allocate_entry=%p) <--\n", __FUNCTION__, ptr, ae);
 
 	hooks_setmine();
 	HT_UNLOCK;
@@ -816,20 +753,21 @@ void __dump(const char *title, char *addr, size_t len) {
 	fflush(htc->heap_report);
 }
 
-size_t unallocated_count, unallocated_size;
+size_t unallocated_count, unallocated_size, dump_intervalID;
 
-void dump_interval_action( 
+void ht_dump_entries_action( 
 	const void 	*node,
 	VISIT		type,
 	int			level)
 {
 	allocate_entry_t 	*ae = *( allocate_entry_t **) node;
 
-	/* nothing to do */
+	/* nothing to do? */
 	if ( type != leaf && type != preorder) return;
-	if ( ae->intervalID != htc->intervalID) return;
+	if ( !( dump_intervalID == -1 || ae->intervalID == dump_intervalID)) return;
 
-	// trc( "node=%p, type=%d, level=%d\n", node, type, level);
+	/* never dump warmup entries */
+	if ( ae->intervalID == 0) return;
 
 	struct tm ltime;
 	localtime_r( &ae->tp.tv_sec, &ltime);
@@ -837,33 +775,145 @@ void dump_interval_action(
 		ltime.tm_year + 1900, ltime.tm_mon + 1, ltime.tm_mday,
 		ltime.tm_hour, ltime.tm_min, ltime.tm_sec, 
 		ae->tp.tv_nsec);
+	// ae->timestamp[0] = '\0';
 	trc_delimiter_line();
 	trc("[intervalID=%d] AREA (ID=%lld, @=%p, size=%ld, timestamp=%s) is still not unallocated (pid=%d)\n",
 			ae->intervalID, ae->id, ae->addr, ae->size, ae->timestamp, ae->pid);
 	trc("   backtrace = \n%s\n", ae->backtrace);
 	unallocated_count ++;
 	unallocated_size += ae->size;
-	__dump("AREA", ae->addr, ae->size);
+	__dump("AREA", ( char *) ae->addr, ae->size);
 	
 }
 
-int dump_interval( const char *backtrace_string)
-{
-	time_t now = time( NULL);	
+/* used to sort by ID */
+typedef struct __ae_sort {
+	unsigned long long	ID;
+	allocate_entry_t	*ae;
+} ae_sort_t;
 
-	if ( htc->dump_interval == 0) return 0;
-	if ( htc->dump_next >= now) return 0;
+ae_sort_t			*ae_sort_table = NULL;
+int					ae_sort_size = 0;
+
+void ht_collect_action( 
+	const void 	*node,
+	VISIT		type,
+	int			level)
+{
+	allocate_entry_t 	*ae = *( allocate_entry_t **) node;
+
+	/* nothing to do? */
+	if ( type != leaf && type != preorder) return;
+	if ( !( dump_intervalID == -1 || ae->intervalID == dump_intervalID)) return;
+
+	/* never dump warmup entries */
+	if ( ae->intervalID == 0) return;
+
+	ae_sort_table[ae_sort_size].ID = ae->id;
+	ae_sort_table[ae_sort_size].ae = ae;
+
+	unallocated_count 	++;
+	unallocated_size  	+= ae->size;
+	
+	ae_sort_size++;
+}
+
+
+static int ae_sort_by_ID( const void *p1, const void *p2)
+{
+	ae_sort_t	*aes1 = ( ae_sort_t *) p1, *aes2 = ( ae_sort_t *) p2;
+
+	if ( aes1->ID < aes2->ID) return -1;
+	if ( aes1->ID > aes2->ID) return 1;
+
+	return 0;
+}
+
+int ht_dump_entries( size_t intervalID)
+{
+	allocate_entry_t	*ae;
+	unallocated_count 	= 0;
+	unallocated_size  	= 0;
+	dump_intervalID 	= intervalID;
+
+	ae_sort_table = ( ae_sort_t *) malloc( sizeof( ae_sort_t) * htc->entries + 1000);
+	ae_sort_size  = 0;
+	twalk( troot, &ht_collect_action);
+	qsort( ae_sort_table, ae_sort_size, sizeof( ae_sort_t), &ae_sort_by_ID);
+
+	/*
+	trc( "INTERVAL SUMMARY REPORT [current intervalID=%d] (%s)\n", htc->intervalID, ( intervalID == -1) ? "ALL" : "");
+	trc( "Unallocated areas ( count, size=%ld KB) = %d\n", unallocated_count, unallocated_size / 1024);
+	*/
+
+	trc_delimiter_line();
+	for( int i = 0; i < ae_sort_size; i++)
+	{
+		ae = ae_sort_table[i].ae;
+
+
+		if ( strstr( ae->backtrace, "libuccache.so") != NULL) continue;
+
+		struct tm ltime;
+		localtime_r( &ae->tp.tv_sec, &ltime);
+		sprintf( ae->timestamp, "%.4d%.2d%.2d/%.2d%.2d%.2d.%ld", 
+			ltime.tm_year + 1900, ltime.tm_mon + 1, ltime.tm_mday,
+			ltime.tm_hour, ltime.tm_min, ltime.tm_sec, 
+			ae->tp.tv_nsec);
+		trc_delimiter_line();
+		trc("[intervalID=%d] AREA (ID=%lld, @=%p, size=%ld, timestamp=%s) is still not unallocated (pid=%d)\n",
+				ae->intervalID, ae->id, ae->addr, ae->size, ae->timestamp, ae->pid);
+		trc("   backtrace = \n%s\n", ae->backtrace);
+		unallocated_count ++;
+		unallocated_size += ae->size;
+		__dump("AREA", ( char *) ae->addr, ae->size);
+	}
+	free( ae_sort_table);
+	ae_sort_size = 0;
+
+	//twalk( troot, &ht_collect_entries_action);
+	trc_delimiter_line();
+	trc( "INTERVAL SUMMARY REPORT [intervalID=%d] (%s)\n", htc->intervalID, ( intervalID == -1) ? "ALL" : "");
+	trc( "Unallocated areas: count=%ld, size=%ld KB\n", unallocated_count, unallocated_size / 1024);
+	trc_delimiter_line();
+
+
+	return 0;
+}
+
+
+/*
+	switches to new interval, dumps all entres created in prev interval
+*/
+int ht_interval_shift( int all)
+{
+	time_t now = time( NULL);
+
+	// if ( htc->dump_interval == 0) return 0;
+	// if ( htc->dump_next >= now) return 0;
 
 	/* 	
 		check, if we were called from any timezone/localtime function,
 		it locks localtime_r() call, causing deadlock.
 		handle interval dump in next calls 
 	*/
-	if ( strstr( backtrace_string, "__tz_convert")   != NULL ||
-		 strstr( backtrace_string, "tzset_internal") != NULL) return 0;
-
+	/*
 	htc->dump_next += htc->dump_interval;
+	if ( htc->intervalID < htc->ignore_interval)
+	{
+		trc( "Interval %d is ignored, due to start parameter\n", htc->intervalID);
+		htc->intervalID ++;
+		return 0;
+	}
+	*/
+	char backtrace_string[8192];
+	generate_backtrace_string( backtrace_string);
 
+	trc( "dumping interval-ID=%d\n", htc->intervalID);
+	trc( "current backtrace string = \n%s\n", backtrace_string);
+	// if ( strstr( backtrace_string, "heap_tracer_trigger") == NULL) return 0;
+    
+	/*
 	struct tm ltime;
 	char	it1[32], it2[32];
 	time_t	interval_start = htc->dump_next - htc->dump_interval;
@@ -875,26 +925,22 @@ int dump_interval( const char *backtrace_string)
 	sprintf( it2, "%.4d%.2d%.2d/%.2d%.2d%.2d", 
 		ltime.tm_year + 1900, ltime.tm_mon + 1, ltime.tm_mday,
 		ltime.tm_hour, ltime.tm_min, ltime.tm_sec);
+		*/
 
-	// trc( "[intervalID=%d] Dumping all unallocated areas\n", htc->intervalID);
-	unallocated_count = 0;
-	unallocated_size  = 0;
 
-	trc_delimiter_line();
-	trc( "[intervalID=%d] Dumping all unallocated areas (%s - %s)\n", htc->intervalID, it1, it2);
-
-	twalk( troot, &dump_interval_action);
-
-	trc_delimiter_line();
-	trc( "INTERVAL SUMMARY REPORT\n");
-	trc( "[intervalID=%d] Number of unallocated areas = %d\n", htc->intervalID, unallocated_count);
-	trc( "[intervalID=%d] Size   of unallocated areas = %d\n", htc->intervalID, unallocated_size);
+	/* dump */
+	if ( all)	
+		ht_dump_entries( -1);
+	else
+		ht_dump_entries( htc->intervalID);
 
 	/* new allocs identified by new intervalID */
 	htc->intervalID ++;
+	flag_set( htc->flag, FLAG_BACKTRACE); // activate backtrace
 
 	return 0;
 }
+
 
 static jmp_buf jump;
 
@@ -925,13 +971,11 @@ int set_checkstring(allocate_entry_t *ae) {
 
 	if ( ae == NULL) return 0;
 
-	if ( ae->real_addr == NULL)  return 0;
-
 	sprintf(temp, "#*#*%p<***>%.10ld#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*",
 				ae->addr, ae->size);
 	memcpy( ae->checkstring, temp, SIZE_CHECK_AREA);
-	memcpy( ae->real_addr, ae->checkstring, SIZE_CHECK_AREA);
-	memcpy( ae->trailer_cs, ae->checkstring, SIZE_CHECK_AREA);
+	memcpy( ae->cs_left,  ae->checkstring, SIZE_CHECK_AREA);
+	memcpy( ae->cs_right, ae->checkstring, SIZE_CHECK_AREA);
 
 	return 0;
 }
@@ -943,27 +987,24 @@ int check_boundaries(allocate_entry_t *ae) {
 
 	if (ae == NULL)	return 0;
 
-	if (ae->real_addr == NULL) return 0;
-
-	if ( memcmp(ae->real_addr, ae->checkstring, SIZE_CHECK_AREA) != 0) {
+	if ( memcmp(ae->cs_left, ae->checkstring, SIZE_CHECK_AREA) != 0) {
 		trc("memory buffer HEADER check string corrupted...\n");
 		corrupted = 1;
 	}
 
-	if ( memcmp( ae->trailer_cs, ae->checkstring, SIZE_CHECK_AREA) != 0) {
+	if ( memcmp( ae->cs_right, ae->checkstring, SIZE_CHECK_AREA) != 0) {
 		trc("memory buffer TRAILER check string corrupted...\n");
 		corrupted = 1;
 	}
 
 	if ( corrupted) {
 		trc( "\taddr      = %p\n", ae->addr);
-		trc( "\treal addr = %p\n", ae->real_addr);
 		trc( "\tsize      = %ld\n", ae->size);
 		trc( "\nbacktrace = %s\n", ae->backtrace);
-		__dump("CHECKSTRING", ae->checkstring, SIZE_CHECK_AREA);
-		__dump("HEADER", ae->real_addr, SIZE_CHECK_AREA);
-		__dump("TRAILER", ae->trailer_cs, SIZE_CHECK_AREA);
-		__dump("FULL", ae->real_addr, ae->size + SIZE_CHECK_AREA * 2);
+		__dump( "CHECKSTRING", ae->checkstring, SIZE_CHECK_AREA);
+		__dump( "LEFT", ( char *) ae->cs_left, SIZE_CHECK_AREA);
+		__dump( "RIGHT", ( char *) ae->cs_right, SIZE_CHECK_AREA);
+		// __dump( "FULL", ( char *) ae->real_addr, ae->size + SIZE_CHECK_AREA * 2);
 	}
 
 	return 0;

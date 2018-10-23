@@ -114,14 +114,15 @@ int main( void)
     for( i = 0; i < 10000; i++)
     {
     	RECURSIVE_FUNCTION_BODY
-		printf( "%d,", i);
-		usleep( 1000);
+		// printf( "%d,", i);
+		// usleep( 1000);
 	}
 
 	printf( "\n");
 	printf( "number of unallocated entries = %d(max=%d)\n", addrs, maxaddrs);
 	for( i = 0; i < addrs; i++)
 		printf( "%p, ", addr[i]);
+	printf( "\n");
 
 	return 0;
 }
