@@ -58,6 +58,8 @@ typedef struct __allocate_entry {
 	size_t 				size;
 	pid_t				pid;
 	int					intervalID;
+	int					flag;
+#define AE_BOUNDARY_ERROR_DETECTED	0x00000001
 	char				timestamp[48];
   	struct timespec 	tp;
 #ifdef __USE_LIBUNWIND
@@ -68,6 +70,9 @@ typedef struct __allocate_entry {
 	char				*cs_trailer;
 	char				cs_header[SIZE_CHECK_AREA];
 } allocate_entry_t;
+
+#define is_boundary_error_detected( __ae) \
+	flag_test( __ae->flag, AE_BOUNDARY_ERROR_DETECTED)
 
 #define AE_TRCF "%p,id=%lld,addr=%p,size=%ld"
 #define AE_TRCI( __ae) \
@@ -90,13 +95,10 @@ typedef struct __heap_tracer_context {
 #define	FLAG_TRACE_MODULE			0x0002
 #define	FLAG_TRACE_HEAP_CALLS		0x0004
 #define	FLAG_BACKTRACE				0x0008
-#define	FLAG_CHECK_BOUNDARIES		0x0010
 #define	FLAG_LOCKING				0x0020
 #define	FLAG_BACKTRACE_FD			0x0040
 #define FLAG_TRACE_ALL				0x0080
-	int 				flag_active;
-	int 				flag_trace_calls;
-	int 				flag_backtrace;
+	int					check_boundaries_freq;
 	int					bt_pipes[2];
 	int					intervalID;
 	size_t				dump_limit;
@@ -113,7 +115,7 @@ typedef struct __heap_tracer_context {
 #define is_trace_module		flag_test( htc->flag, FLAG_TRACE_MODULE)
 #define is_trace_all		flag_test( htc->flag, FLAG_TRACE_ALL)
 #define is_backtrace		flag_test( htc->flag, FLAG_BACKTRACE)
-#define is_check_boundaries	flag_test( htc->flag, FLAG_CHECK_BOUNDARIES)
+#define is_check_boundaries	( htc->check_boundaries_freq != 0)
 #define is_locking			flag_test( htc->flag, FLAG_LOCKING)
 #define is_backtrace_fd		flag_test( htc->flag, FLAG_BACKTRACE_FD)
 
@@ -204,8 +206,8 @@ void ht_open(void)
 			"		collects backtrace data with backtrace_symbols() function\n"
 			"	backtrace_fd\n"
 			"		collects backtrace data with backtrace_symbols_fd() function\n"
-			"	check_boundaries\n"
-			"		checks memory over/underwrites, allocated areas are surrounded by eyecatcher\n"
+			"	check_boundaries==n\n"
+			"		checks memory over/underwrites on every [n] heap call\n"
 			"	locking\n"
 			"		locks heap tracer functions, usefull for multithread applications\n"
 			"	dump_limit=B\n"
@@ -253,8 +255,8 @@ void ht_open(void)
 	if ((p = strstr(htenv, "backtrace_fd")) != NULL)
 		flag_set(htc->flag, FLAG_BACKTRACE | FLAG_BACKTRACE_FD);
 
-	if ((p = strstr(htenv, "check_boundaries")) != NULL)
-		flag_set(htc->flag, FLAG_CHECK_BOUNDARIES);
+	if ((p = strstr(htenv, "check_boundaries_freq=")) != NULL)
+		htc->check_boundaries_freq = atoi( p + 22);
 
 	if ((p = strstr(htenv, "locking")) != NULL)
 		flag_set(htc->flag, FLAG_LOCKING);
@@ -290,7 +292,7 @@ void ht_open(void)
 	trc( "\ttrace calls           = %s\n", ( is_trace_calls) ? "yes" : "no");
 	trc( "\ttrace module          = %s\n", ( is_trace_module) ? "yes" : "no");
 	trc( "\ttrace all             = %s\n", ( is_trace_all) ? "yes" : "no");
-	trc( "\tbounday check         = %s\n", ( is_check_boundaries) ? "yes" : "no");
+	trc( "\tbounday check freq    = %d\n", htc->check_boundaries_freq);
 	trc( "\tlock                  = %s\n", ( is_locking) ? "yes" : "no");
 	trc( "\tdump limit            = %d bytes\n", htc->dump_limit);
 	trc( "\tdump interval         = %d seconds\n", htc->dump_interval);
@@ -333,7 +335,7 @@ void ht_boundary_check_action(
 
 extern "C" int ht_boundary_check(int x)
 {
-	trc( "check boundaries...\n");
+	// trc( "check boundaries...\n");
 	twalk( troot, &ht_boundary_check_action);
 }
 
@@ -537,6 +539,11 @@ allocate_entry_t * add_ae( allocate_entry_t *ae, size_t size) {
 
 	if ( is_trace_module) trc("%s(ae=%p, address=%p, %ld,troot=%p) -->\n", __FUNCTION__, ae, ( ae + 1), size, troot);
 
+	/* check boundaries every [check_boundaries_freq] */
+	if ( is_check_boundaries)
+		if ( htc->id % htc->check_boundaries_freq == 0)
+			ht_boundary_check( 0);
+
 	memcpy( ae->eyec, "%%AE", 4);
 	ae->addr = ( void *) ( ae + 1);
 	ae->size = size;
@@ -596,6 +603,11 @@ allocate_entry_t * remove_ae( void *addr)
 	htc->entries--;
 	htc->allocated -= ae->size;
 	if ( htc->allocated > htc->max_size) htc->max_size = htc->allocated;
+
+	/* check boundaries every [check_boundaries_freq] */
+	if ( is_check_boundaries)
+		if ( htc->id % htc->check_boundaries_freq == 0)
+			ht_boundary_check( 0);
 
 	if ( is_trace_module) trc( "%s <-- (ae=%p,troot=%p)\n", __FUNCTION__, ae, troot);
 
@@ -864,17 +876,12 @@ int ht_dump_entries( size_t intervalID)
 	twalk( troot, &ht_collect_action);
 	qsort( ae_sort_table, ae_sort_size, sizeof( ae_sort_t), &ae_sort_by_ID);
 
-	/*
-	trc( "INTERVAL SUMMARY REPORT [current intervalID=%d] (%s)\n", htc->intervalID, ( intervalID == -1) ? "ALL" : "");
-	trc( "Unallocated areas ( count, size=%ld KB) = %d\n", unallocated_count, unallocated_size / 1024);
-	*/
-
 	trc_delimiter_line();
 	for( int i = 0; i < ae_sort_size; i++)
 	{
 		ae = ae_sort_table[i].ae;
 
-		if ( strstr( ae->backtrace, "libuccache.so") != NULL) continue;
+		// if ( strstr( ae->backtrace, "libuccache.so") != NULL) continue;
 
 		struct tm ltime;
 		localtime_r( &ae->tp.tv_sec, &ltime);
@@ -898,7 +905,6 @@ int ht_dump_entries( size_t intervalID)
 	trc( "INTERVAL SUMMARY REPORT [intervalID=%d] (%s)\n", htc->intervalID, ( intervalID == -1) ? "ALL" : "");
 	trc( "Unallocated areas: count=%ld, size=%ld KB\n", unallocated_count, unallocated_size / 1024);
 	trc_delimiter_line();
-
 
 	return 0;
 }
@@ -1001,7 +1007,7 @@ int set_checkstring(allocate_entry_t *ae) {
 	ae->cs_trailer = (( char *) ae->addr) + ae->size;
 	memcpy( ae->cs_trailer, ae->checkstring, SIZE_CHECK_AREA);
 
-	trc( "header=%p, trailer=%p");
+	// trc( "header=%p, trailer=%p");
 
 	return 0;
 }
@@ -1009,11 +1015,12 @@ int set_checkstring(allocate_entry_t *ae) {
 int check_boundaries(allocate_entry_t *ae) {
 	int corrupted = 0;
 
-	if (!is_check_boundaries) return 0;
+	if ( !is_check_boundaries) return 0;
 
-	trc( "checking " AE_TRCF "\n", AE_TRCI( ae));
+	if ( ae == NULL)	return 0;
 
-	if (ae == NULL)	return 0;
+	// ignore boundary check if already detected
+	if ( is_boundary_error_detected( ae)) return 0;
 
 	if ( memcmp(ae->cs_header, ae->checkstring, SIZE_CHECK_AREA) != 0) {
 		trc( "memory buffer HEADER check string corrupted...\n");
@@ -1032,7 +1039,6 @@ int check_boundaries(allocate_entry_t *ae) {
 		__dump( "CHECK-STRING", ae->checkstring, SIZE_CHECK_AREA);
 		__dump( "CS-HEADER", ( char *) ae->cs_header, SIZE_CHECK_AREA);
 		__dump( "CS-TRAILER", ( char *) ae->cs_trailer, SIZE_CHECK_AREA);
-		// __dump( "FULL", ( char *) ae->real_addr, ae->size + SIZE_CHECK_AREA * 2);
 	}
 
 	return 0;

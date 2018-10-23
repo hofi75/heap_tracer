@@ -7,10 +7,10 @@ clean:
 	rm -f my-leaky-program
 
 heap_tracer.o: heap_tracer.c
-	g++ -fPIC -c -g -Wno-deprecated-declarations -fpermissive -I/usr/include/c++/5 -o heap_tracer.o heap_tracer.c
+	g++ -fPIC -c -g -Wno-deprecated-declarations -fpermissive -o heap_tracer.o heap_tracer.c
 
 heap_tracer.so: heap_tracer.o
-	g++ -fPIC -shared -Wl,--no-undefined -rdynamic -lstdc++ -lc++ -L/usr/local/lib -g -o heap_tracer.so heap_tracer.o /usr/local/lib/libunwind.so
+	g++ -fPIC -shared -Wl,--no-undefined -rdynamic -g -o heap_tracer.so heap_tracer.o
 
 my-leaky-program: my-leaky-program.c
 	gcc -rdynamic my-leaky-program.c -g -std=c99 -o my-leaky-program
