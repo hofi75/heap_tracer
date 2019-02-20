@@ -1,6 +1,7 @@
 *.txt
 my-leaky-program
 *.o
-# heap_tracer.so
+heap_tracer.so
+heap_tester
 libunwind*
 core*
